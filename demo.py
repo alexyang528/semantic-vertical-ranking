@@ -32,12 +32,12 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
     first_results = [
         module["results"][0]
         for module in response["modules"]
-        if module["verticalConfigId"] != "links"
+        if module["source"] == "KNOWLEDGE_MANAGER"
     ]
     vertical_ids = [
         module["verticalConfigId"]
         for module in response["modules"]
-        if module["verticalConfigId"] != "links"
+        if module["source"] == "KNOWLEDGE_MANAGER"
     ]
 
     boost_vector = [
@@ -47,7 +47,7 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
     new_ranks, _, max_fields, max_values, max_similarities, embeddings = get_new_vertical_ranks(
         QUERY, vertical_ids, first_results, boost_vector
     )
-    
+
     left_col, right_col = st.columns(2)
     with left_col:
         st.write("## Original Results")
@@ -56,7 +56,6 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
 
     for old_rank, _ in enumerate(new_ranks):
         new_rank = new_ranks.index(old_rank)
-
         original_module = response["modules"][old_rank]
         reordered_module = response["modules"][new_rank]
         delta = new_rank - old_rank
