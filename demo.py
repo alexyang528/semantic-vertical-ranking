@@ -11,23 +11,9 @@ embedding the highlighted fields of the top result of each vertical.
 YEXT_API_KEY = st.text_input("API Key")
 EXPERIENCE_KEY = st.text_input("Experience Key")
 QUERY = st.text_input("Query")
-VERTICALS = st.text_input("Verticals (Comma Separated)")
+VERTICALS = st.text_input("Verticals for Boosting (Comma Separated)")
 
 VERTICALS = [v.strip() for v in VERTICALS.split(",") if v]
-
-# verticals = [
-#     "developer_documents",
-#     "discourse",
-#     "faqs",
-#     "guides",
-#     "help_articles",
-#     "hh_blog",
-#     "hh_event",
-#     "hh_module",
-#     "hh_track",
-#     "hh_unit",
-#     "promotion",
-# ]
 
 st.sidebar.write("## Vertical Boosts")
 vertical_boost_map = {}

@@ -141,19 +141,23 @@ def get_snippet(value, matched_subs, chars_before=50, chars_after=50, use_dense=
 
 
 def parse_highlighted_fields(vertical_id, first_result):
-    # Initialize output lists
-    matched_values = []
-    matched_fields = []
+    # Initialize output lists to the name of the vertical
+    matched_values = [_clean_vertical_id(vertical_id)]
+    matched_fields = ["vertical_id"]
 
-    # Add the name of the vertical to the matched values / fields
-    # matched_fields.append("*vertical_id")
-    # matched_values.append(_clean_vertical_id(vertical_id))
-
-    if not first_result or not "highlightedFields" in first_result:
+    # Return just vertical ID if the result JSON is None
+    if not first_result:
+        LOGGER.error("Received an empty first result JSON for vertical ID: {}.".format(vertical_id))
         return matched_values, matched_fields
 
+    # Try to append the name of the first result by default
+    name_value = first_result.get("data", {}).get("name", None)
+    if name_value:
+        matched_values.append(name_value)
+        matched_fields.append("name")
+
     # Begin JSON parsing highlighted fields
-    highlighted_field = first_result["highlightedFields"]
+    highlighted_field = first_result.get("highlightedFields", {})
 
     # For all highlighted fields, pull out the matched substrings and values
     for k, v in highlighted_field.items():
@@ -173,7 +177,7 @@ def parse_highlighted_fields(vertical_id, first_result):
 
                 matched_values.extend(processed_values)
                 processed_fields = [
-                    k + "*snipped" if v != pv else k for v, pv in zip(values, processed_values)
+                    k + " (snipped)" if v != pv else k for v, pv in zip(values, processed_values)
                 ]
                 matched_fields.extend(processed_fields)
             # 2) List of {field: matchedSubstring / value} dicts - if highlighted field is an object
@@ -186,19 +190,14 @@ def parse_highlighted_fields(vertical_id, first_result):
                 ]
                 matched_values.extend(processed_values)
                 processed_fields = [
-                    k + "*snipped" if v != pv else k for v, pv in zip(values, processed_values)
+                    k + " (snipped)" if v != pv else k for v, pv in zip(values, processed_values)
                 ]
                 matched_fields.extend(processed_fields)
         # 3) Single dict of {matchedSubstrings / value} - if there is just one match
         else:
             processed_values = get_snippet(v["value"], v["matchedSubstrings"])
             matched_values.append(processed_values)
-            matched_fields.append(k + "*snipped" if v["value"] != processed_values else k)
-
-    # If there are no highlighted field values, then use the name data field instead
-    if len(matched_values) == 0:
-        matched_values = [first_result["data"]["name"]]
-        matched_fields = ["name"]
+            matched_fields.append(k + " (snipped)" if v["value"] != processed_values else k)
 
     assert len(matched_values) == len(matched_fields)
     return matched_values, matched_fields
