@@ -34,7 +34,7 @@ def _get_data_from_presto(query, PRESTO_USER=PRESTO_USER, PRESTO_HOST=PRESTO_HOS
     return query_export
 
 
-def _get_liveapi_response(search_term, yext_client, experience_key):
+def get_liveapi_response(search_term, yext_client, experience_key):
     results = yext_client.search_answers_universal(query=search_term, experience_key=experience_key)
     response = results.raw_response["response"]
     return response
@@ -100,7 +100,7 @@ def _clean_vertical_id(vertical_id):
     return cleaned_vertical_id
 
 
-def get_snippet(value, matched_subs, chars_before=50, chars_after=200, use_dense=True):
+def get_snippet(value, matched_subs, chars_before=50, chars_after=50, use_dense=True):
     if not matched_subs:
         return value[:chars_after]
     if len(value) < (chars_before + chars_after):
@@ -141,19 +141,19 @@ def get_snippet(value, matched_subs, chars_before=50, chars_after=200, use_dense
 
 
 def parse_highlighted_fields(vertical_id, first_result):
-    if first_result is None:
-        return [], [], [], []
-
     # Initialize output lists
     matched_values = []
     matched_fields = []
 
+    # Add the name of the vertical to the matched values / fields
+    # matched_fields.append("*vertical_id")
+    # matched_values.append(_clean_vertical_id(vertical_id))
+
+    if not first_result or not "highlightedFields" in first_result:
+        return matched_values, matched_fields
+
     # Begin JSON parsing highlighted fields
     highlighted_field = first_result["highlightedFields"]
-
-    # Add the name of the vertical to the matched values / fields
-    matched_fields.append("*vertical_id")
-    matched_values.append(_clean_vertical_id(vertical_id))
 
     # For all highlighted fields, pull out the matched substrings and values
     for k, v in highlighted_field.items():
@@ -204,7 +204,7 @@ def parse_highlighted_fields(vertical_id, first_result):
     return matched_values, matched_fields
 
 
-def get_new_vertical_ranks(query, vertical_ids, first_results):
+def get_new_vertical_ranks(query, vertical_ids, first_results, boost_vector=None):
     # Get highlighed field values of the top entity result for each vertical
     all_values_and_fields = [
         parse_highlighted_fields(vertical_id, result)
@@ -219,18 +219,29 @@ def get_new_vertical_ranks(query, vertical_ids, first_results):
 
     # Compute similarities between query and matched values
     similarities = [[_similarity(query_embed, v_i) for v_i in v] for v in value_embeds]
-    max_similarities = [max(l, default=None) for l in similarities]
+
+    # Boost if a boost vector is provided
+    if boost_vector:
+        similarities = [[sim + boost for sim in l] for l, boost in zip(similarities, boost_vector)]
 
     # Get the index of the max similarity, and the corresponding field and value
+    max_similarities = [max(l, default=None) for l in similarities]
     idx_max_similarities = [l.index(i) for l, i in zip(similarities, max_similarities)]
     max_values = [l[i] for l, i in zip(all_values, idx_max_similarities)]
     max_fields = [l[i] for l, i in zip(all_fields, idx_max_similarities)]
 
     # Get the new vertical rankings by sorting on similarities
-    new_rank = [sorted(similarities, reverse=True).index(x) for x in similarities]
+    new_rank = [sorted(max_similarities, reverse=True).index(x) for x in max_similarities]
 
     assert len(first_results) == len(max_values) == len(max_fields) == len(new_rank)
-    return new_rank, _flatten(all_fields), max_fields, max_similarities, embeddings_calculated
+    return (
+        new_rank,
+        _flatten(all_fields),
+        max_fields,
+        max_values,
+        max_similarities,
+        embeddings_calculated,
+    )
 
 
 def compile_comparison_json(df):
@@ -301,7 +312,7 @@ def main(args):
         response_progress = progress.add_task("[green]Querying...", total=len(df.index))
         responses = []
         for query in df["query"]:
-            response = _get_liveapi_response(query, yext_client, args.experience_key)
+            response = get_liveapi_response(query, yext_client, args.experience_key)
             responses.append(response)
             progress.update(response_progress, advance=1)
         df["old_results"] = responses
@@ -324,7 +335,7 @@ def main(args):
         max_fields = []
         total_embeddings = []
         for q, v, f in zip(df["query"], df["vertical_ids"], df["first_results"]):
-            new_rank, all_fs, max_fs, _, embeddings = get_new_vertical_ranks(q, v, f)
+            new_rank, all_fs, max_fs, _, _, embeddings = get_new_vertical_ranks(q, v, f)
             new_ranks.append(new_rank)
             all_fields.append(all_fs)
             max_fields.append(max_fs)
