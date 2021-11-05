@@ -8,8 +8,9 @@ logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[
 LOGGER = logging.getLogger(__name__)
 
 import argparse
-import os
 import json
+import os
+import re
 import requests
 import pandas as pd
 from pyhive import presto
@@ -85,6 +86,20 @@ def _flatten(values):
     return out
 
 
+def _clean_vertical_id(vertical_id):
+    # Convert camel case into space-separated words
+    cleaned_vertical_id = re.sub("([a-z])([A-Z])", "\g<1> \g<2>", vertical_id)
+
+    # Replace - and _
+    cleaned_vertical_id = cleaned_vertical_id.replace("-", " ")
+    cleaned_vertical_id = cleaned_vertical_id.replace("_", " ")
+
+    # Lowercase
+    cleaned_vertical_id = cleaned_vertical_id.lower()
+
+    return cleaned_vertical_id
+
+
 def get_snippet(value, matched_subs, chars_before=50, chars_after=200, use_dense=True):
     if not matched_subs:
         return value[:chars_after]
@@ -125,8 +140,8 @@ def get_snippet(value, matched_subs, chars_before=50, chars_after=200, use_dense
     return value[display_start:display_end]
 
 
-def parse_highlighted_fields(result_json):
-    if result_json is None:
+def parse_highlighted_fields(vertical_id, first_result):
+    if first_result is None:
         return [], [], [], []
 
     # Initialize output lists
@@ -134,7 +149,11 @@ def parse_highlighted_fields(result_json):
     matched_fields = []
 
     # Begin JSON parsing highlighted fields
-    highlighted_field = result_json["highlightedFields"]
+    highlighted_field = first_result["highlightedFields"]
+
+    # Add the name of the vertical to the matched values / fields
+    matched_fields.append("*vertical_id")
+    matched_values.append(_clean_vertical_id(vertical_id))
 
     # For all highlighted fields, pull out the matched substrings and values
     for k, v in highlighted_field.items():
@@ -153,7 +172,10 @@ def parse_highlighted_fields(result_json):
                 ]
 
                 matched_values.extend(processed_values)
-                matched_fields.extend([k] * len(processed_values))
+                processed_fields = [
+                    k + "*snipped" if v != pv else k for v, pv in zip(values, processed_values)
+                ]
+                matched_fields.extend(processed_fields)
             # 2) List of {field: matchedSubstring / value} dicts - if highlighted field is an object
             except:
                 values = [v_i[k_i]["value"] for v_i in v for k_i in v_i]
@@ -163,35 +185,40 @@ def parse_highlighted_fields(result_json):
                     get_snippet(value, sub) for value, sub in zip(values, substrings)
                 ]
                 matched_values.extend(processed_values)
-                matched_fields.extend([k] * len(processed_values))
+                processed_fields = [
+                    k + "*snipped" if v != pv else k for v, pv in zip(values, processed_values)
+                ]
+                matched_fields.extend(processed_fields)
         # 3) Single dict of {matchedSubstrings / value} - if there is just one match
         else:
             processed_values = get_snippet(v["value"], v["matchedSubstrings"])
             matched_values.append(processed_values)
-            matched_fields.append(k)
+            matched_fields.append(k + "*snipped" if v["value"] != processed_values else k)
 
     # If there are no highlighted field values, then use the name data field instead
     if len(matched_values) == 0:
-        matched_values = [result_json["data"]["name"]]
+        matched_values = [first_result["data"]["name"]]
         matched_fields = ["name"]
 
     assert len(matched_values) == len(matched_fields)
     return matched_values, matched_fields
 
 
-def get_new_vertical_ranks(query, first_results):
+def get_new_vertical_ranks(query, vertical_ids, first_results):
     # Get highlighed field values of the top entity result for each vertical
-    all_values_and_fields = [parse_highlighted_fields(result) for result in first_results]
+    all_values_and_fields = [
+        parse_highlighted_fields(vertical_id, result)
+        for vertical_id, result in zip(vertical_ids, first_results)
+    ]
     all_values = [i[0] for i in all_values_and_fields]
     all_fields = [i[1] for i in all_values_and_fields]
 
     # Embed the query and the values of each first result
     query_embed, value_embeds = _get_embeddings(query, all_values)
+    embeddings_calculated = len(_flatten(all_values)) + 1
 
     # Compute similarities between query and matched values
-    similarities = [
-        [_similarity(query_embed, v_i) for v_i in value_embed] for value_embed in value_embeds
-    ]
+    similarities = [[_similarity(query_embed, v_i) for v_i in v] for v in value_embeds]
     max_similarities = [max(l, default=None) for l in similarities]
 
     # Get the index of the max similarity, and the corresponding field and value
@@ -203,7 +230,7 @@ def get_new_vertical_ranks(query, first_results):
     new_rank = [sorted(similarities, reverse=True).index(x) for x in similarities]
 
     assert len(first_results) == len(max_values) == len(max_fields) == len(new_rank)
-    return new_rank, len(all_values) + 1
+    return new_rank, _flatten(all_fields), max_fields, max_similarities, embeddings_calculated
 
 
 def compile_comparison_json(df):
@@ -293,13 +320,19 @@ def main(args):
     with Progress() as progress:
         rerank_progress = progress.add_task("[green]Calculating...", total=len(df.index))
         new_ranks = []
+        all_fields = []
+        max_fields = []
         total_embeddings = []
-        for query, first_results in zip(df["query"], df["first_results"]):
-            new_rank, embeddings = get_new_vertical_ranks(query, first_results)
+        for q, v, f in zip(df["query"], df["vertical_ids"], df["first_results"]):
+            new_rank, all_fs, max_fs, _, embeddings = get_new_vertical_ranks(q, v, f)
             new_ranks.append(new_rank)
+            all_fields.append(all_fs)
+            max_fields.append(max_fs)
             total_embeddings.append(embeddings)
             progress.update(rerank_progress, advance=1)
         df["new_vertical_rank"] = new_ranks
+        df["all_fields"] = all_fields
+        df["max_fields"] = max_fields
         df["total_embeddings"] = total_embeddings
     LOGGER.info("Done.")
 
@@ -308,9 +341,21 @@ def main(args):
     compile_comparison_json(df)
     LOGGER.info("Done.")
 
-    LOGGER.info(
-        "{} embeddings calculated on average per query.".format(df["total_embeddings"].mean())
-    )
+    LOGGER.info("{} embeddings on average per query.".format(df["total_embeddings"].mean()))
+
+    # Get the max fields
+    max_field_counts = dict()
+    for field in _flatten(df["max_fields"].values.tolist()):
+        max_field_counts[field] = max_field_counts.get(field, 0) + 1
+    all_field_counts = dict()
+    for field in _flatten(df["all_fields"].values.tolist()):
+        all_field_counts[field] = all_field_counts.get(field, 0) + 1
+    field_relevance = dict()
+    for k in all_field_counts.keys():
+        field_relevance[k] = round(max_field_counts.get(k, 0) / all_field_counts[k], 2)
+
+    LOGGER.info("Field relevance (%% of instances where field was max similarity):")
+    LOGGER.info(field_relevance)
 
 
 if __name__ == "__main__":
@@ -339,7 +384,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if not args.search_terms:
-        LOGGER.info("Getting top 50 search terms by search volume...")
+        LOGGER.info("Getting top 100 search terms by search volume...")
         query = """
             select tokenizer_normalized_query, count(distinct query_id)
             from log_federator_requests
@@ -347,7 +392,7 @@ if __name__ == "__main__":
             and answers_key = '{}'
             group by 1
             order by 2 desc
-            limit 5
+            limit 100
         """.format(
             args.experience_key
         )
