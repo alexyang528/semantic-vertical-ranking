@@ -2,6 +2,7 @@ import logging
 from rich.logging import RichHandler
 from rich.progress import Progress
 
+
 LOG_FORMAT = "%(message)s"
 logging.basicConfig(level="INFO", format=LOG_FORMAT, datefmt="[%X] ", handlers=[RichHandler()])
 LOGGER = logging.getLogger(__name__)
@@ -13,6 +14,7 @@ import requests
 import pandas as pd
 from pyhive import presto
 from scipy.spatial.distance import cosine
+from yext import YextClient
 
 PRESTO_USER = os.getenv("PRESTO_USER")
 PRESTO_HOST = os.getenv("PRESTO_HOST")
@@ -31,47 +33,45 @@ def _get_data_from_presto(query, PRESTO_USER=PRESTO_USER, PRESTO_HOST=PRESTO_HOS
     return query_export
 
 
-def _get_liveapi_response(search_term, api_key, experience_key):
-    # Get URL and headers of Live API request
-    url = (
-        "https://liveapi.yext.com/v2/accounts/me/answers/query?v=20190101&api_key={}&"
-        "jsLibVersion=v1.7.0&sessionTrackingEnabled=true&input={}&experienceKey={}&"
-        "version=PRODUCTION&locale=en&referrerPageUrl=&source=STANDARD".format(
-            api_key, search_term, experience_key
-        )
-    )
-    headers = {
-        "user-agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)"
-            " Chrome/87.0.4280.88 Safari/537.36"
-        )
-    }
-
-    # Make get request to Live API and track JSON response
-    r = requests.get(url=url, headers=headers)
-    output = json.loads(r.text)
-
-    live_api_response = {
-        "query": search_term,
-        "answers_key": experience_key,
-        "result": output["response"],
-    }
-
-    return live_api_response
+def _get_liveapi_response(search_term, yext_client, experience_key):
+    results = yext_client.search_answers_universal(query=search_term, experience_key=experience_key)
+    response = results.raw_response["response"]
+    return response
 
 
-def _embed_single_query(query):
-    out = requests.post(
-        "http://cuda-serv01.dev.us2.yext.com:30034/embed",
-        json={"queries": [query], "lang": "en"},
+def _embed(strings: list) -> list:
+
+    embeddings = requests.post(
+        "http://cuda-serv01.dev.us2.yext.com:30034/embed", json={"queries": strings, "lang": "en"}
     ).json()["embeddings"]
 
-    return out[0]
+    embeddings = [[float(i) for i in l] for l in embeddings]
+    return embeddings
 
 
-def _compare_embedded_queries(str_a, str_b):
-    embed_a = [float(i) for i in _embed_single_query(str_a)]
-    embed_b = [float(i) for i in _embed_single_query(str_b)]
+def _get_embeddings(query, values):
+
+    # Save length of first result values lists
+    lengths = [len(_flatten(l)) for l in values]
+    values = _flatten(values)
+
+    # Get embeddings of query and all first result values
+    embeds = _embed([query] + values)
+
+    # Get embedding of query
+    query_embed = embeds[0]
+    embeds = embeds[1:]
+
+    # Get embeddings of first result values
+    value_embeds = []
+    for length in lengths:
+        value_embeds.append(embeds[:length])
+        embeds = embeds[length:]
+
+    return query_embed, value_embeds
+
+
+def _similarity(embed_a, embed_b):
     return 1 - cosine(embed_a, embed_b)
 
 
@@ -130,12 +130,11 @@ def parse_highlighted_fields(result_json):
         return [], [], [], []
 
     # Initialize output lists
-    highlighted_fields = []
     matched_values = []
+    matched_fields = []
 
     # Begin JSON parsing highlighted fields
     highlighted_field = result_json["highlightedFields"]
-    highlighted_fields.append(highlighted_field)
 
     # For all highlighted fields, pull out the matched substrings and values
     for k, v in highlighted_field.items():
@@ -152,7 +151,9 @@ def parse_highlighted_fields(result_json):
                 processed_values = [
                     get_snippet(value, sub) for value, sub in zip(values, substrings)
                 ]
+
                 matched_values.extend(processed_values)
+                matched_fields.extend([k] * len(processed_values))
             # 2) List of {field: matchedSubstring / value} dicts - if highlighted field is an object
             except:
                 values = [v_i[k_i]["value"] for v_i in v for k_i in v_i]
@@ -162,33 +163,47 @@ def parse_highlighted_fields(result_json):
                     get_snippet(value, sub) for value, sub in zip(values, substrings)
                 ]
                 matched_values.extend(processed_values)
+                matched_fields.extend([k] * len(processed_values))
         # 3) Single dict of {matchedSubstrings / value} - if there is just one match
         else:
             processed_values = get_snippet(v["value"], v["matchedSubstrings"])
             matched_values.append(processed_values)
+            matched_fields.append(k)
 
     # If there are no highlighted field values, then use the name data field instead
     if len(matched_values) == 0:
         matched_values = [result_json["data"]["name"]]
+        matched_fields = ["name"]
 
-    return matched_values
+    assert len(matched_values) == len(matched_fields)
+    return matched_values, matched_fields
 
 
 def get_new_vertical_ranks(query, first_results):
     # Get highlighed field values of the top entity result for each vertical
-    values = [parse_highlighted_fields(result) for result in first_results]
+    all_values_and_fields = [parse_highlighted_fields(result) for result in first_results]
+    all_values = [i[0] for i in all_values_and_fields]
+    all_fields = [i[1] for i in all_values_and_fields]
+
+    # Embed the query and the values of each first result
+    query_embed, value_embeds = _get_embeddings(query, all_values)
 
     # Compute similarities between query and matched values
     similarities = [
-        max([_compare_embedded_queries(query, v_i) for v_i in _flatten(value)], default=None)
-        for value in values
+        [_similarity(query_embed, v_i) for v_i in value_embed] for value_embed in value_embeds
     ]
+    max_similarities = [max(l, default=None) for l in similarities]
+
+    # Get the index of the max similarity, and the corresponding field and value
+    idx_max_similarities = [l.index(i) for l, i in zip(similarities, max_similarities)]
+    max_values = [l[i] for l, i in zip(all_values, idx_max_similarities)]
+    max_fields = [l[i] for l, i in zip(all_fields, idx_max_similarities)]
 
     # Get the new vertical rankings by sorting on similarities
     new_rank = [sorted(similarities, reverse=True).index(x) for x in similarities]
 
-    assert len(first_results) == len(values) == len(similarities) == len(new_rank)
-    return new_rank, len(_flatten(values))
+    assert len(first_results) == len(max_values) == len(max_fields) == len(new_rank)
+    return new_rank, len(all_values) + 1
 
 
 def compile_comparison_json(df):
@@ -197,20 +212,16 @@ def compile_comparison_json(df):
 
     def _replace_modules(response, reordered_modules):
         return {
-            "query": response["query"],
-            "answers_key": response["answers_key"],
-            "result": {
-                "businessId": response["result"]["businessId"],
-                "failedVerticals": [],
-                "modules": reordered_modules,
-                "queryId": response["result"]["queryId"],
-                "searchIntents": response["result"]["searchIntents"],
-                "locationBias": response["result"]["locationBias"],
-            },
+            "businessId": response["businessId"],
+            "failedVerticals": [],
+            "modules": reordered_modules,
+            "queryId": response["queryId"],
+            "searchIntents": response["searchIntents"],
+            "locationBias": response["locationBias"],
         }
 
     # Get new order of modules
-    df["modules"] = df["old_results"].apply(lambda response: response["result"]["modules"])
+    df["modules"] = df["old_results"].apply(lambda response: response["modules"])
     df["reordered_modules"] = [
         _reorder_modules(module, new_rank)
         for module, new_rank in zip(df["modules"], df["new_vertical_rank"])
@@ -238,8 +249,8 @@ def compile_comparison_json(df):
         comparison_json[answersKey] = [
             {
                 "query": query,
-                "oldResult": {"query": query, "result": oldResult["result"]},
-                "newResult": {"query": query, "result": newResult["result"]},
+                "oldResult": {"query": query, "result": oldResult},
+                "newResult": {"query": query, "result": newResult},
             }
             for query, oldResult, newResult in zip(queries, oldResults, newResults)
         ]
@@ -251,6 +262,8 @@ def compile_comparison_json(df):
 
 def main(args):
 
+    yext_client = YextClient(args.api_key)
+
     # Initialize DataFrame with queries and answers key
     df = pd.DataFrame(args.search_terms, columns=["query"])
     df["answers_key"] = [args.experience_key] * len(df.index)
@@ -261,20 +274,18 @@ def main(args):
         response_progress = progress.add_task("[green]Querying...", total=len(df.index))
         responses = []
         for query in df["query"]:
-            response = _get_liveapi_response(query, args.api_key, args.experience_key)
+            response = _get_liveapi_response(query, yext_client, args.experience_key)
             responses.append(response)
             progress.update(response_progress, advance=1)
         df["old_results"] = responses
 
     # Pull out the first entity result for each vertical module returned for each query
     df["vertical_ids"] = df["old_results"].apply(
-        lambda response: [i["verticalConfigId"] for i in response["result"]["modules"]]
+        lambda response: [i["verticalConfigId"] for i in response["modules"]]
     )
-    df["entity_results"] = df["old_results"].apply(
-        lambda response: [i["results"] for i in response["result"]["modules"]]
-    )
-    df["first_results"] = df["entity_results"].apply(
-        lambda results: [result[0] for result in results]
+
+    df["first_results"] = df["old_results"].apply(
+        lambda response: [i["results"][0] for i in response["modules"]]
     )
 
     # Calculate similarities to highlighted fields of first results and rerank verticals
@@ -332,11 +343,11 @@ if __name__ == "__main__":
         query = """
             select tokenizer_normalized_query, count(distinct query_id)
             from log_federator_requests
-            where date(dd) > date_add('day', -30, now())
+            where date(dd) > date_add('day', -1, now())
             and answers_key = '{}'
             group by 1
             order by 2 desc
-            limit 50
+            limit 5
         """.format(
             args.experience_key
         )
