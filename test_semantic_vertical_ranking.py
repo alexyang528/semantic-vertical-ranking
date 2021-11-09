@@ -15,6 +15,7 @@ import requests
 import pandas as pd
 from pyhive import presto
 from scipy.spatial.distance import cosine
+from scipy.stats import rankdata
 from yext import YextClient
 
 PRESTO_USER = os.getenv("PRESTO_USER")
@@ -230,7 +231,8 @@ def get_new_vertical_ranks(query, vertical_ids, first_results, boost_vector=None
     max_fields = [l[i] for l, i in zip(all_fields, idx_max_similarities)]
 
     # Get the new vertical rankings by sorting on similarities
-    new_rank = [sorted(max_similarities, reverse=True).index(x) for x in max_similarities]
+    new_rank = rankdata(max_similarities, method='ordinal')
+    new_rank = [x-1 for x in new_rank]
 
     assert len(first_results) == len(max_values) == len(max_fields) == len(new_rank)
     return (
