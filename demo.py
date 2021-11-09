@@ -3,9 +3,9 @@ from yext import YextClient
 from test_semantic_vertical_ranking import get_new_vertical_ranks, get_liveapi_response
 
 """
-# Vertical Ranking - Embedding Prototype
-This app is an interactive demo of the new vertical ranking approach of
-embedding the highlighted fields of the top result of each vertical.
+# Vertical Ranking 2.0 Prototype
+This app is an interactive demo of a new vertical ranking approach, including vertical score using 
+semantic similarity of top results, vertical boosts, and vertical intents.
 """
 
 YEXT_API_KEY = st.text_input("API Key")
