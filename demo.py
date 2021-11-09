@@ -1,6 +1,6 @@
 import streamlit as st
 from yext import YextClient
-from test_semantic_vertical_ranking import get_new_vertical_ranks, get_liveapi_response
+from semantic_vertical_ranking import get_new_vertical_ranks, get_liveapi_response
 
 """
 # Vertical Ranking 2.0 Prototype
