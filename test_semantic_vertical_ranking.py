@@ -232,7 +232,8 @@ def get_new_vertical_ranks(query, vertical_ids, first_results, boost_vector=None
 
     # Get the new vertical rankings by sorting on similarities
     new_rank = rankdata(max_similarities, method='ordinal')
-    new_rank = [x-1 for x in new_rank]
+    # Flip new rank, so it is highest to lowest similarity
+    new_rank = [len(new_rank) - x for x in new_rank]
 
     assert len(first_results) == len(max_values) == len(max_fields) == len(new_rank)
     return (
