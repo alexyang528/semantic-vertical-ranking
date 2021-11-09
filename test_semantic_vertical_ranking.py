@@ -141,10 +141,15 @@ def get_snippet(value, matched_subs, chars_before=50, chars_after=50, use_dense=
     return value[display_start:display_end]
 
 
-def parse_highlighted_fields(vertical_id, first_result):
+def parse_highlighted_fields(vertical_id, first_result, vertical_intents):
+
+    # Initialize with vertical intents
+    matched_values = vertical_intents
+    matched_fields = ["vertical_intent"] * len(matched_values)
+
     # Initialize output lists to the name of the vertical
-    matched_values = [_clean_vertical_id(vertical_id)]
-    matched_fields = ["vertical_id"]
+    # matched_values = [_clean_vertical_id(vertical_id)]
+    # matched_fields = ["vertical_id"]
 
     # Return just vertical ID if the result JSON is None
     if not first_result:
@@ -204,10 +209,12 @@ def parse_highlighted_fields(vertical_id, first_result):
     return matched_values, matched_fields
 
 
-def get_new_vertical_ranks(query, vertical_ids, first_results, boost_vector=None):
+def get_new_vertical_ranks(
+    query, vertical_ids, first_results, vertical_intents={}, vertical_boosts={}
+):
     # Get highlighed field values of the top entity result for each vertical
     all_values_and_fields = [
-        parse_highlighted_fields(vertical_id, result)
+        parse_highlighted_fields(vertical_id, result, vertical_intents.get(vertical_id, []))
         for vertical_id, result in zip(vertical_ids, first_results)
     ]
     all_values = [i[0] for i in all_values_and_fields]
@@ -221,8 +228,8 @@ def get_new_vertical_ranks(query, vertical_ids, first_results, boost_vector=None
     similarities = [[_similarity(query_embed, v_i) for v_i in v] for v in value_embeds]
 
     # Boost if a boost vector is provided
-    if boost_vector:
-        similarities = [[sim + boost for sim in l] for l, boost in zip(similarities, boost_vector)]
+    boost_vector = [vertical_boosts.get(id_, 0) for id_ in vertical_ids]
+    similarities = [[sim + boost for sim in l] for l, boost in zip(similarities, boost_vector)]
 
     # Get the index of the max similarity, and the corresponding field and value
     max_similarities = [max(l, default=None) for l in similarities]
@@ -231,7 +238,7 @@ def get_new_vertical_ranks(query, vertical_ids, first_results, boost_vector=None
     max_fields = [l[i] for l, i in zip(all_fields, idx_max_similarities)]
 
     # Get the new vertical rankings by sorting on similarities
-    new_rank = rankdata(max_similarities, method='ordinal')
+    new_rank = rankdata(max_similarities, method="ordinal")
     # Flip new rank, so it is highest to lowest similarity
     new_rank = [len(new_rank) - x for x in new_rank]
 

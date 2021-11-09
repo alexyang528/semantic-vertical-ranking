@@ -16,12 +16,17 @@ VERTICALS = st.text_input("Verticals for Boosting (Comma Separated)")
 VERTICALS = [v.strip() for v in VERTICALS.split(",") if v]
 
 st.sidebar.write("## Vertical Boosts")
-vertical_boost_map = {}
+vertical_boosts = {}
 for vertical in VERTICALS:
-    vertical_boost_map[vertical] = st.sidebar.slider(
+    vertical_boosts[vertical] = st.sidebar.slider(
         label=vertical, value=0.0, min_value=-1.0, max_value=1.0, step=0.05
     )
 
+st.sidebar.write("## Vertical Intents")
+vertical_intents = {}
+for vertical in VERTICALS:
+    vertical_intents_str = st.sidebar.text_input("{} (Comma Separated)".format(vertical))
+    vertical_intents[vertical] = [i.strip() for i in vertical_intents_str.split(",") if i]
 
 if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
     try:
@@ -40,12 +45,8 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
         if module["source"] == "KNOWLEDGE_MANAGER"
     ]
 
-    boost_vector = [
-        vertical_boost_map[id_] if id_ in vertical_boost_map else 0 for id_ in vertical_ids
-    ]
-
     new_ranks, _, max_fields, max_values, max_similarities, embeddings = get_new_vertical_ranks(
-        QUERY, vertical_ids, first_results, boost_vector
+        QUERY, vertical_ids, first_results, vertical_intents, vertical_boosts
     )
 
     left_col, right_col = st.columns(2)
