@@ -123,6 +123,13 @@ def main(args):
         lambda response: [i["results"][0] for i in response["modules"]]
     )
 
+    vertical_boosts = {}
+    vertical_intents = {}
+    if args.boost_file:
+        vertical_boosts = json.load(open(args.boost_file))
+    if args.intents_file:
+        vertical_intents = json.load(open(args.intents_file))
+
     # Calculate similarities to highlighted fields of first results and rerank verticals
     LOGGER.info("Calculating new vertical ranks...")
     with Progress() as progress:
@@ -132,7 +139,9 @@ def main(args):
         max_fields = []
         total_embeddings = []
         for q, v, f in zip(df["query"], df["vertical_ids"], df["first_results"]):
-            new_rank, all_fs, max_fs, _, _, embeddings = get_new_vertical_ranks(q, v, f)
+            new_rank, all_fs, max_fs, _, _, embeddings = get_new_vertical_ranks(
+                q, v, f, vertical_intents, vertical_boosts
+            )
             new_ranks.append(new_rank)
             all_fields.append(all_fs)
             max_fields.append(max_fs)
@@ -189,6 +198,22 @@ if __name__ == "__main__":
         help="The search terms for which to compute vertical rankings.",
         required=False,
     )
+    parser.add_argument(
+        "-b",
+        "--boost_file",
+        type=str,
+        help="The name of the JSON file to read boosts dict from.",
+        required=False,
+        default=None,
+    )
+    parser.add_argument(
+        "-i",
+        "--intents_file",
+        type=str,
+        help="The name of the JSON file to read intents dict from.",
+        required=False,
+        default=None,
+    )
     args = parser.parse_args()
 
     if not args.search_terms:
@@ -196,7 +221,7 @@ if __name__ == "__main__":
         query = """
             select tokenizer_normalized_query, count(distinct query_id)
             from log_federator_requests
-            where date(dd) > date_add('day', -1, now())
+            where date(dd) > date_add('day', -7, now())
             and answers_key = '{}'
             group by 1
             order by 2 desc
