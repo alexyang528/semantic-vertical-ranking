@@ -60,20 +60,6 @@ def _flatten(values):
     return out
 
 
-def _clean_vertical_id(vertical_id):
-    # Convert camel case into space-separated words
-    cleaned_vertical_id = re.sub("([a-z])([A-Z])", "\g<1> \g<2>", vertical_id)
-
-    # Replace - and _
-    cleaned_vertical_id = cleaned_vertical_id.replace("-", " ")
-    cleaned_vertical_id = cleaned_vertical_id.replace("_", " ")
-
-    # Lowercase
-    cleaned_vertical_id = cleaned_vertical_id.lower()
-
-    return cleaned_vertical_id
-
-
 def get_snippet(value, matched_subs, chars_before=50, chars_after=50, use_dense=True):
     if not matched_subs:
         return value[:chars_after]
@@ -129,6 +115,7 @@ def _parse_value_recursively(field, value):
         processed_fields = _flatten([i[1] for i in values_and_fields])
         return processed_values, processed_fields
 
+    # 3) List of {matchedSubstrings / value} or {field: {matchedSubstring / value}}
     if type(value) == list:
         values_and_fields = [_parse_value_recursively(field, v) for v in value]
         processed_values = _flatten([i[0] for i in values_and_fields])
