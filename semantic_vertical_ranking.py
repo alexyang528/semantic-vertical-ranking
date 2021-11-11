@@ -114,17 +114,35 @@ def get_snippet(value, matched_subs, chars_before=50, chars_after=50, use_dense=
     return value[display_start:display_end]
 
 
+def _parse_value_recursively(field, value):
+
+    # 1) Single dict of {matchedSubstrings / value} - if there is just one match
+    if type(value) == dict and set(value.keys()) == set(["value", "matchedSubstrings"]):
+        processed_value = get_snippet(value["value"], value["matchedSubstrings"])
+        processed_field = field + " (snipped)" if value["value"] != processed_value else field
+        return [processed_value], [processed_field]
+
+    # 2) Dict of {field: {matchedSubstrings / value}} - if field is an object
+    if type(value) == dict:
+        values_and_fields = [_parse_value_recursively(f, v) for f, v in value.items()]
+        processed_values = _flatten([i[0] for i in values_and_fields])
+        processed_fields = _flatten([i[1] for i in values_and_fields])
+        return processed_values, processed_fields
+
+    if type(value) == list:
+        values_and_fields = [_parse_value_recursively(field, v) for v in value]
+        processed_values = _flatten([i[0] for i in values_and_fields])
+        processed_fields = _flatten([i[1] for i in values_and_fields])
+        return processed_values, processed_fields
+
+
 def parse_highlighted_fields(vertical_id, first_result, vertical_intents):
 
     # Initialize with vertical intents
     matched_values = vertical_intents
     matched_fields = ["vertical_intent"] * len(matched_values)
 
-    # Initialize output lists to the name of the vertical
-    # matched_values = [_clean_vertical_id(vertical_id)]
-    # matched_fields = ["vertical_id"]
-
-    # Return just vertical ID if the result JSON is None
+    # Return just vertical intents if the result JSON is None
     if not first_result:
         LOGGER.error("Received an empty first result JSON for vertical ID: {}.".format(vertical_id))
         return matched_values, matched_fields
@@ -136,65 +154,12 @@ def parse_highlighted_fields(vertical_id, first_result, vertical_intents):
         matched_fields.append("name")
 
     # Begin JSON parsing highlighted fields
-    highlighted_field = first_result.get("highlightedFields", {})
+    highlights = first_result.get("highlightedFields", {})
 
-    # For all highlighted fields, pull out the matched substrings and values
-    for k, v in highlighted_field.items():
-        if v == []:
-            continue
-
-        ### For each highlighted field, there are four possible formats:
-        # 1) List of {matchedSubstrings / value} pairs - if there are multiple matches in a field
-        if type(v) == list:
-            try:
-                values = [v_i["value"] for v_i in v]
-                substrings = [v_i["matchedSubstrings"] for v_i in v]
-
-                processed_values = [
-                    get_snippet(value, sub) for value, sub in zip(values, substrings)
-                ]
-
-                matched_values.extend(processed_values)
-                processed_fields = [
-                    k + " (snipped)" if v != pv else k for v, pv in zip(values, processed_values)
-                ]
-                matched_fields.extend(processed_fields)
-            # 2) List of {field: matchedSubstring / value} dicts - if there are many field matches
-            except:
-                values = [v_i[k_i]["value"] for v_i in v for k_i in v_i]
-                substrings = [v_i[k_i]["matchedSubstrings"] for v_i in v for k_i in v_i]
-
-                processed_values = [
-                    get_snippet(value, sub) for value, sub in zip(values, substrings)
-                ]
-                matched_values.extend(processed_values)
-                processed_fields = [
-                    k + " (snipped)" if v != pv else k for v, pv in zip(values, processed_values)
-                ]
-                matched_fields.extend(processed_fields)
-        # 3) Dict of {field: {value / matchedSubstring}} dicts - if field is an object like address
-        else:
-            if "value" not in v:
-                values = [v_i["value"] for k_i, v_i in v.items()]
-                substrings = [v_i["matchedSubstrings"] for k_i, v_i in v.items()]
-                fields = [k_i for k_i, v_i in v.items()]
-
-                processed_values = [
-                    get_snippet(value, sub) for value, sub in zip(values, substrings)
-                ]
-                matched_values.extend(processed_values)
-
-                processed_fields = [
-                    field + " (snipped)" if v != pv else field
-                    for field, v, pv in zip(fields, values, processed_values)
-                ]
-                matched_fields.extend(processed_fields)
-
-            # 4) Single dict of {matchedSubstrings / value} - if there is just one match
-            else:
-                processed_values = get_snippet(v["value"], v["matchedSubstrings"])
-                matched_values.append(processed_values)
-                matched_fields.append(k + " (snipped)" if v["value"] != processed_values else k)
+    # Recursively get field, value pairs from highlightedFields
+    highlighted_values, highlighted_fields = _parse_value_recursively(None, highlights)
+    matched_values.extend(highlighted_values)
+    matched_fields.extend(highlighted_fields)
 
     assert len(matched_values) == len(matched_fields)
     return matched_values, matched_fields
@@ -225,10 +190,10 @@ def get_new_vertical_ranks(
     # Get the index of the max similarity, and the corresponding field and value
     max_similarities = [max(l, default=-1) for l in similarities]
     idx_max_similarities = [
-        l.index(i) if i != -1 else None for l, i in zip(similarities, max_similarities)
+        l.index(i) if i != -1 else -1 for l, i in zip(similarities, max_similarities)
     ]
-    max_values = [l[i] if i else None for l, i in zip(all_values, idx_max_similarities)]
-    max_fields = [l[i] if i else None for l, i in zip(all_fields, idx_max_similarities)]
+    max_values = [l[i] if i != -1 else None for l, i in zip(all_values, idx_max_similarities)]
+    max_fields = [l[i] if i != -1 else None for l, i in zip(all_fields, idx_max_similarities)]
 
     # Get the new vertical rankings by sorting on similarities
     new_rank = rankdata(max_similarities, method="ordinal")
