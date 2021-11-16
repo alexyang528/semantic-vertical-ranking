@@ -1,6 +1,10 @@
 import streamlit as st
 from yext import YextClient
-from semantic_vertical_ranking import get_new_vertical_ranks, get_liveapi_response
+from semantic_vertical_ranking import (
+    get_new_vertical_ranks,
+    get_autocomplete_suggestions,
+    get_liveapi_response,
+)
 
 """
 # Vertical Ranking 2.0 Prototype
@@ -8,6 +12,7 @@ This app is an interactive demo of a new vertical ranking approach, including ve
 semantic similarity of top results, vertical boosts, and vertical intents.
 """
 
+BUSINESS_ID = st.text_input("Business ID")
 YEXT_API_KEY = st.text_input("API Key")
 EXPERIENCE_KEY = st.text_input("Experience Key")
 QUERY = st.text_input("Query")
@@ -28,6 +33,13 @@ for vertical in VERTICALS:
     vertical_intents_str = st.sidebar.text_input("{} (Comma Separated)".format(vertical))
     vertical_intents[vertical] = [i.strip() for i in vertical_intents_str.split(",") if i]
 
+# st.sidebar.write("## Include Autocomplete?")
+# include_autocomplete = {}
+# for vertical in VERTICALS:
+#     autocomplete_bool = st.sidebar.checkbox(label=vertical)
+#     include_autocomplete[vertical] = autocomplete_bool
+
+
 if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
     try:
         yext_client = YextClient(YEXT_API_KEY)
@@ -44,10 +56,35 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
         for module in response["modules"]
         if module["source"] == "KNOWLEDGE_MANAGER"
     ]
+    query_filters = [
+        module["appliedQueryFilters"]
+        for module in response["modules"]
+        if module["source"] == "KNOWLEDGE_MANAGER"
+    ]
+    filter_values = [[f_i["displayValue"] for f_i in f] for f in query_filters]
+
+    # Get autocomplete suggestions for each vertical key
+    # for vertical in include_autocomplete:
+    #     if include_autocomplete[vertical]:
+    #         first_word = QUERY.split(" ")[0]
+    #         print(vertical)
+    #         prompts = get_autocomplete_suggestions(
+    #             BUSINESS_ID, EXPERIENCE_KEY, YEXT_API_KEY, vertical, first_word
+    #         )
+    #         print(prompts)
+
+    #         if vertical in vertical_intents:
+    #             vertical_intents[vertical].extend(prompts)
+    #         else:
+    #             vertical_intents[vertical] = prompts
+
+    #         print(vertical_intents[vertical])
 
     new_ranks, _, max_fields, max_values, max_similarities, embeddings = get_new_vertical_ranks(
-        QUERY, vertical_ids, first_results, vertical_intents, vertical_boosts
+        QUERY, vertical_ids, first_results, filter_values, vertical_intents, vertical_boosts
     )
+
+    max_values = [i.replace("\n", " ") for i in max_values]
 
     left_col, right_col = st.columns(2)
     with left_col:

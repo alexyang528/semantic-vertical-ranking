@@ -14,6 +14,23 @@ def get_liveapi_response(search_term, yext_client, experience_key):
     return response
 
 
+def get_autocomplete_suggestions(business_id, experience_key, api_key, vertical_id, search_term=""):
+    url = "https://liveapi.yext.com/v2/accounts/{accountId}/answers/vertical/autocomplete".format(
+        accountId=business_id
+    )
+    params = {
+        "v": "20161012",
+        "api_key": api_key,
+        "experienceKey": experience_key,
+        "verticalKey": vertical_id,
+        "locale": "en",
+        "input": search_term,
+    }
+    response = requests.get(url, params).json()["response"]
+    vertical_prompts = [value["value"] for value in response["results"]]
+    return vertical_prompts
+
+
 def _embed(strings: list) -> list:
 
     embeddings = requests.post(
@@ -89,13 +106,18 @@ def get_snippet(value, matched_subs, chars_before=50, chars_after=50, use_dense=
     display_end = min(offset + chars_after, len(value) - 1)
 
     # Adjusting Start - Go forward until space
-    if display_start != 0 and value[display_start - 1] != " ":
+    if (
+        display_start != 0
+        and value[display_start - 1] != " "
+        and " " in value[display_start:display_end]
+    ):
         while value[display_start] != " ":
             display_start += 1
 
-    # Adjusting End - Go backward until space
-    while value[display_end] != " ":
-        display_end -= 1
+    if display_end != len(value) - 1 and " " in value[display_start:display_end]:
+        # Adjusting End - Go backward until space
+        while value[display_end] != " ":
+            display_end -= 1
 
     return value[display_start:display_end]
 
@@ -123,15 +145,19 @@ def _parse_value_recursively(field, value):
         return processed_values, processed_fields
 
 
-def parse_highlighted_fields(vertical_id, first_result, vertical_intents):
+def parse_highlighted_fields(vertical_id, first_result, filter_values, vertical_intents):
 
     # Initialize with vertical intents
     matched_values = vertical_intents
     matched_fields = ["vertical_intent"] * len(matched_values)
 
+    # Add NLP filter values to values to consider
+    matched_values.extend(filter_values)
+    matched_fields.extend(["filter_value"] * len(filter_values))
+
     # Return just vertical intents if the result JSON is None
     if not first_result:
-        LOGGER.error("Received an empty first result JSON for vertical ID: {}.".format(vertical_id))
+        LOGGER.warning("Empty first result JSON for vertical ID: {}.".format(vertical_id))
         return matched_values, matched_fields
 
     # Try to append the name of the first result by default
@@ -153,12 +179,12 @@ def parse_highlighted_fields(vertical_id, first_result, vertical_intents):
 
 
 def get_new_vertical_ranks(
-    query, vertical_ids, first_results, vertical_intents={}, vertical_boosts={}
+    query, vertical_ids, first_results, filter_values, vertical_intents={}, vertical_boosts={}
 ):
     # Get highlighed field values of the top entity result for each vertical
     all_values_and_fields = [
-        parse_highlighted_fields(vertical_id, result, vertical_intents.get(vertical_id, []))
-        for vertical_id, result in zip(vertical_ids, first_results)
+        parse_highlighted_fields(vert_id, result, filters, vertical_intents.get(vert_id, []))
+        for vert_id, result, filters in zip(vertical_ids, first_results, filter_values)
     ]
     all_values = [i[0] for i in all_values_and_fields]
     all_fields = [i[1] for i in all_values_and_fields]
@@ -183,9 +209,11 @@ def get_new_vertical_ranks(
     max_fields = [l[i] if i != -1 else None for l, i in zip(all_fields, idx_max_similarities)]
 
     # Get the new vertical rankings by sorting on similarities
-    new_rank = rankdata(max_similarities, method="ordinal")
+    # new_rank = rankdata(max_similarities, method="ordinal")
     # Flip new rank, so it is highest to lowest similarity
-    new_rank = [len(new_rank) - x for x in new_rank]
+    # new_rank = [len(new_rank) - x for x in new_rank]
+
+    new_rank = get_new_rank(max_fields, max_similarities)
 
     assert len(first_results) == len(max_values) == len(max_fields) == len(new_rank)
     return (
@@ -196,3 +224,12 @@ def get_new_vertical_ranks(
         max_similarities,
         embeddings_calculated,
     )
+
+
+def get_new_rank(max_fields, max_similarities):
+    is_priority = [1 if (field == "filter_value" or field == "name") else 0 for field in max_fields]
+    new_rank = [
+        i for i, v in sorted(enumerate(zip(max_similarities, is_priority)), key=lambda x: x[1])
+    ]
+    new_rank = [len(new_rank) - x - 1 for x in new_rank]
+    return new_rank
