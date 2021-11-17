@@ -4,8 +4,8 @@ LOGGER = logging.getLogger(__name__)
 
 import re
 import requests
+import pandas as pd
 from scipy.spatial.distance import cosine
-from scipy.stats import rankdata
 
 
 def get_liveapi_response(search_term, yext_client, experience_key):
@@ -34,7 +34,7 @@ def get_autocomplete_suggestions(business_id, experience_key, api_key, vertical_
 def _embed(strings: list) -> list:
 
     embeddings = requests.post(
-        "http://cuda-serv01.dev.us2.yext.com:30034/embed", json={"queries": strings, "lang": "en"}
+        "http://cuda-serv01.dev.us2.yext.com:30035/embed", json={"queries": strings, "lang": "en"}
     ).json()["embeddings"]
 
     embeddings = [[float(i) for i in l] for l in embeddings]
@@ -46,6 +46,9 @@ def _get_embeddings(query, values):
     # Save length of first result values lists
     lengths = [len(_flatten(l)) for l in values]
     values = _flatten(values)
+
+    # Strip and normalize all values (remove punctuation, etc.)
+    values = [re.sub("[^A-Za-z0-9]+", "", value) for value in values]
 
     # Get embeddings of query and all first result values
     embeds = _embed([query] + values)
@@ -122,6 +125,20 @@ def get_snippet(value, matched_subs, chars_before=50, chars_after=50, use_dense=
     return value[display_start:display_end]
 
 
+def _get_semantic_fields(data, semantic_fields):
+
+    # Get the value of semantic fields from data returned in LiveAPI
+    fields_and_values = [
+        (data[semantic_field], semantic_field)
+        for semantic_field in semantic_fields
+        if semantic_field in data
+    ]
+    values = [i[0] for i in fields_and_values]
+    fields = [i[1] for i in fields_and_values]
+
+    return values, fields
+
+
 def _parse_value_recursively(field, value):
 
     # 1) Single dict of {matchedSubstrings / value} - if there is just one match
@@ -145,7 +162,9 @@ def _parse_value_recursively(field, value):
         return processed_values, processed_fields
 
 
-def parse_highlighted_fields(vertical_id, first_result, filter_values, vertical_intents):
+def parse_highlighted_fields(
+    vertical_id, first_result, filter_values, vertical_intents, semantic_fields
+):
 
     # Initialize with vertical intents
     matched_values = vertical_intents
@@ -160,30 +179,42 @@ def parse_highlighted_fields(vertical_id, first_result, filter_values, vertical_
         LOGGER.warning("Empty first result JSON for vertical ID: {}.".format(vertical_id))
         return matched_values, matched_fields
 
-    # Try to append the name of the first result by default
-    name_value = first_result.get("data", {}).get("name", None)
-    if name_value:
-        matched_values.append(name_value)
-        matched_fields.append("name")
+    # If semantic fields are provided, only pull values of semantic fields
+    if semantic_fields:
+        data = first_result.get("data", {})
+        semantic_values, semantic_fields_found = _get_semantic_fields(data, semantic_fields)
+        matched_values.extend(semantic_values)
+        matched_fields.extend(semantic_fields_found)
 
-    # Begin JSON parsing highlighted fields
-    highlights = first_result.get("highlightedFields", {})
-
-    # Recursively get field, value pairs from highlightedFields
-    highlighted_values, highlighted_fields = _parse_value_recursively(None, highlights)
-    matched_values.extend(highlighted_values)
-    matched_fields.extend(highlighted_fields)
+    # Otherwise, recursively get field, value pairs from highlightedFields
+    else:
+        highlights = first_result.get("highlightedFields", {})
+        highlighted_values, highlighted_fields = _parse_value_recursively(None, highlights)
+        matched_values.extend(highlighted_values)
+        matched_fields.extend(highlighted_fields)
 
     assert len(matched_values) == len(matched_fields)
     return matched_values, matched_fields
 
 
 def get_new_vertical_ranks(
-    query, vertical_ids, first_results, filter_values, vertical_intents={}, vertical_boosts={}
+    query,
+    vertical_ids,
+    first_results,
+    filter_values,
+    semantic_fields={},
+    vertical_intents={},
+    vertical_boosts={},
 ):
     # Get highlighed field values of the top entity result for each vertical
     all_values_and_fields = [
-        parse_highlighted_fields(vert_id, result, filters, vertical_intents.get(vert_id, []))
+        parse_highlighted_fields(
+            vert_id,
+            result,
+            filters,
+            vertical_intents.get(vert_id, []),
+            semantic_fields.get(vert_id, []),
+        )
         for vert_id, result, filters in zip(vertical_ids, first_results, filter_values)
     ]
     all_values = [i[0] for i in all_values_and_fields]
@@ -208,11 +239,7 @@ def get_new_vertical_ranks(
     max_values = [l[i] if i != -1 else None for l, i in zip(all_values, idx_max_similarities)]
     max_fields = [l[i] if i != -1 else None for l, i in zip(all_fields, idx_max_similarities)]
 
-    # Get the new vertical rankings by sorting on similarities
-    # new_rank = rankdata(max_similarities, method="ordinal")
-    # Flip new rank, so it is highest to lowest similarity
-    # new_rank = [len(new_rank) - x for x in new_rank]
-
+    # Get new ranking based on fields and similarities
     new_rank = get_new_rank(max_fields, max_similarities)
 
     assert len(first_results) == len(max_values) == len(max_fields) == len(new_rank)
@@ -227,9 +254,11 @@ def get_new_vertical_ranks(
 
 
 def get_new_rank(max_fields, max_similarities):
+    # Determine if match is on a "priority field"
     is_priority = [1 if (field == "filter_value" or field == "name") else 0 for field in max_fields]
-    new_rank = [
-        i for i, v in sorted(enumerate(zip(max_similarities, is_priority)), key=lambda x: x[1])
-    ]
-    new_rank = [len(new_rank) - x - 1 for x in new_rank]
-    return new_rank
+
+    # Rank by similarity first, tiebreak using priority field
+    df = pd.DataFrame.from_records(list(zip(max_similarities, is_priority)))
+    df["rank"] = df.sort_values([1], ascending=False)[0].rank(method="first", ascending=False)
+
+    return [int(i) - 1 for i in df["rank"].to_list()]

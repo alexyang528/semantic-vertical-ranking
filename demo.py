@@ -12,11 +12,11 @@ This app is an interactive demo of a new vertical ranking approach, including ve
 semantic similarity of top results, vertical boosts, and vertical intents.
 """
 
-BUSINESS_ID = st.text_input("Business ID")
+# BUSINESS_ID = st.text_input("Business ID")
 YEXT_API_KEY = st.text_input("API Key")
 EXPERIENCE_KEY = st.text_input("Experience Key")
 QUERY = st.text_input("Query")
-VERTICALS = st.text_input("Verticals for Boosting (Comma Separated)")
+VERTICALS = st.text_input("Vertical Keys for Boosting and Intents (Comma Separated)")
 
 VERTICALS = [v.strip() for v in VERTICALS.split(",") if v]
 
@@ -30,8 +30,14 @@ for vertical in VERTICALS:
 st.sidebar.write("## Vertical Intents")
 vertical_intents = {}
 for vertical in VERTICALS:
-    vertical_intents_str = st.sidebar.text_input("{} (Comma Separated)".format(vertical))
+    vertical_intents_str = st.sidebar.text_input("{} (Comma Separated)".format(vertical), key=1)
     vertical_intents[vertical] = [i.strip() for i in vertical_intents_str.split(",") if i]
+
+st.sidebar.write("## Limit to Semantic Fields")
+semantic_fields = {}
+for vertical in VERTICALS:
+    semantic_fields_str = st.sidebar.text_input("{} (Comma Separated)".format(vertical), key=2)
+    semantic_fields[vertical] = [i.strip() for i in semantic_fields_str.split(",") if i]
 
 # st.sidebar.write("## Include Autocomplete?")
 # include_autocomplete = {}
@@ -80,11 +86,19 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
 
     #         print(vertical_intents[vertical])
 
+    # Get new vertical ranks and fields/ values driving change
     new_ranks, _, max_fields, max_values, max_similarities, embeddings = get_new_vertical_ranks(
-        QUERY, vertical_ids, first_results, filter_values, vertical_intents, vertical_boosts
+        QUERY,
+        vertical_ids,
+        first_results,
+        filter_values,
+        semantic_fields,
+        vertical_intents,
+        vertical_boosts,
     )
 
-    max_values = [i.replace("\n", " ") for i in max_values]
+    # Remove line breaks from values for better presentation
+    max_values = [i.replace("\n", " ") if i else None for i in max_values]
 
     left_col, right_col = st.columns(2)
     with left_col:
