@@ -41,11 +41,11 @@ def _get_data_from_presto(query, PRESTO_USER=PRESTO_USER, PRESTO_HOST=PRESTO_HOS
     return query_export
 
 
-def compile_comparison_json(df):
-    def _reorder_modules(modules, new_rank):
+def compile_comparison_json(answers_key, queries, responses, new_ranks, output_file):
+    def _reorder(modules, new_rank):
         return [module for i, module in sorted(zip(new_rank, modules), key=lambda x: x[0])]
 
-    def _replace_modules(response, reordered_modules):
+    def _replace(response, reordered_modules):
         return {
             "businessId": response["businessId"],
             "failedVerticals": [],
@@ -53,76 +53,53 @@ def compile_comparison_json(df):
             "queryId": response["queryId"],
             "searchIntents": response["searchIntents"],
             "locationBias": response["locationBias"],
+            "directAnswer": response.get("directAnswer", "")
         }
 
+
     # Get new order of modules
-    df["modules"] = df["old_results"].apply(lambda response: response["modules"])
-    df["reordered_modules"] = [
-        _reorder_modules(module, new_rank)
-        for module, new_rank in zip(df["modules"], df["new_vertical_rank"])
-    ]
-
-    # Compile new liveAPI response format with reordered modules
-    df["new_results"] = [
-        _replace_modules(old_result, new_modules)
-        for old_result, new_modules in zip(df["old_results"], df["reordered_modules"])
-    ]
-
-    # Aggregate by answers key
-    agg_df = df.groupby("answers_key").agg(
-        {"query": list, "old_results": list, "new_results": list}
-    )
-    agg_df = agg_df.reset_index()
+    modules = [response["modules"] for response in responses]
+    reordered_modules = [_reorder(module, new_rank) for module, new_rank in zip(modules, new_ranks)]
 
     comparison_json = {}
-    for _, row in agg_df.iterrows():
-        answersKey = row["answers_key"]
-        queries = row["query"]
-        oldResults = row["old_results"]
-        newResults = row["new_results"]
+    comparison_json[answers_key] = [
+        {
+            "query": query,
+            "oldResult": {"query": query, "result": response},
+            "newResult": {"query": query, "result": _replace(response, reordered_module)},
+        }
+        for query, response, reordered_module in zip(queries, responses, reordered_modules)
+    ]
 
-        comparison_json[answersKey] = [
-            {
-                "query": query,
-                "oldResult": {"query": query, "result": oldResult},
-                "newResult": {"query": query, "result": newResult},
-            }
-            for query, oldResult, newResult in zip(queries, oldResults, newResults)
-        ]
-
-    with open("comparison.json", "w") as f:
+    with open(output_file, "w") as f:
         json.dump(comparison_json, f)
-    return df
+
+
+def get_top_search_terms_from_presto(answers_key, business_id, count=500):
+    LOGGER.info(f"Getting top {count} search terms by search volume...")
+    query = f"""
+        select tokenizer_normalized_query, count(distinct query_id)
+        from log_federator_requests
+        where date(dd) > date_add('day', -7, now())
+        and answers_key = '{answers_key}'
+        and business_id = {business_id}
+        group by 1
+        order by 2 desc
+        limit {count}
+    """
+    df = _get_data_from_presto(query, PRESTO_USER, PRESTO_HOST)
+    search_terms = df["tokenizer_normalized_query"].values.tolist()
+    LOGGER.info("Done. Received {} search terms from Presto.".format(len(search_terms)))
+    return search_terms
 
 
 def main(args):
 
+    search_terms = get_top_search_terms_from_presto(
+        args.experience_key, args.business_id, args.limit
+    )
+
     yext_client = YextClient(args.api_key)
-
-    # Initialize DataFrame with queries and answers key
-    df = pd.DataFrame(args.search_terms, columns=["query"])
-    df["answers_key"] = [args.experience_key] * len(df.index)
-
-    # Get LiveAPI responses for all queries
-    LOGGER.info("Getting LiveAPI responses...")
-    with Progress() as progress:
-        response_progress = progress.add_task("[green]Querying...", total=len(df.index))
-        responses = []
-        for query in df["query"]:
-            response = get_liveapi_response(query, yext_client, args.experience_key)
-            responses.append(response)
-            progress.update(response_progress, advance=1)
-        df["old_results"] = responses
-
-    # Pull out the first entity result for each vertical module returned for each query
-    df["vertical_ids"] = df["old_results"].apply(
-        lambda response: [i["verticalConfigId"] for i in response["modules"]]
-    )
-
-    df["first_results"] = df["old_results"].apply(
-        lambda response: [i["results"][0] for i in response["modules"]]
-    )
-
     vertical_boosts = {}
     vertical_intents = {}
     if args.boost_file:
@@ -130,49 +107,52 @@ def main(args):
     if args.intents_file:
         vertical_intents = json.load(open(args.intents_file))
 
-    # Calculate similarities to highlighted fields of first results and rerank verticals
-    LOGGER.info("Calculating new vertical ranks...")
+    responses = []
+    new_ranks = []
+
+    # Get LiveAPI responses for all queries
+    LOGGER.info("Reranking...")
     with Progress() as progress:
-        rerank_progress = progress.add_task("[green]Calculating...", total=len(df.index))
-        new_ranks = []
-        all_fields = []
-        max_fields = []
-        total_embeddings = []
-        for q, v, f in zip(df["query"], df["vertical_ids"], df["first_results"]):
-            new_rank, all_fs, max_fs, _, _, embeddings = get_new_vertical_ranks(
-                q, v, f, vertical_intents, vertical_boosts
-            )
+        rerank_progress = progress.add_task("[green]Reranking...", total=len(search_terms))
+        for query in search_terms:
+            # Get Live API response for each search term
+            response = get_liveapi_response(query, yext_client, args.experience_key)
+            responses.append(response)
+
+            # Pull out top results, vertical IDs, and filter values for each module returned
+            first_results = [
+                module["results"][0]
+                for module in response["modules"]
+                if module["source"] == "KNOWLEDGE_MANAGER"
+            ]
+            vertical_ids = [
+                module["verticalConfigId"]
+                for module in response["modules"]
+                if module["source"] == "KNOWLEDGE_MANAGER"
+            ]
+            query_filters = [
+                module["appliedQueryFilters"]
+                for module in response["modules"]
+                if module["source"] == "KNOWLEDGE_MANAGER"
+            ]
+            filter_values = [[f_i["displayValue"] for f_i in f] for f in query_filters]
+
+            # Get new rank of verticals for query
+            new_rank = get_new_vertical_ranks(
+                query,
+                vertical_ids,
+                first_results,
+                filter_values,
+                semantic_fields={},
+                vertical_intents=vertical_intents,
+                vertical_boosts=vertical_boosts,
+            )[0]
             new_ranks.append(new_rank)
-            all_fields.append(all_fs)
-            max_fields.append(max_fs)
-            total_embeddings.append(embeddings)
+
             progress.update(rerank_progress, advance=1)
-        df["new_vertical_rank"] = new_ranks
-        df["all_fields"] = all_fields
-        df["max_fields"] = max_fields
-        df["total_embeddings"] = total_embeddings
+
+    compile_comparison_json(args.experience_key, search_terms, responses, new_ranks, args.output)
     LOGGER.info("Done.")
-
-    # Generate comparison JSON for diff tool
-    LOGGER.info("Compiling final comparison JSON...")
-    compile_comparison_json(df)
-    LOGGER.info("Done.")
-
-    LOGGER.info("{} embeddings on average per query.".format(df["total_embeddings"].mean()))
-
-    # Get the max fields
-    max_field_counts = dict()
-    for field in _flatten(df["max_fields"].values.tolist()):
-        max_field_counts[field] = max_field_counts.get(field, 0) + 1
-    all_field_counts = dict()
-    for field in _flatten(df["all_fields"].values.tolist()):
-        all_field_counts[field] = all_field_counts.get(field, 0) + 1
-    field_relevance = dict()
-    for k in all_field_counts.keys():
-        field_relevance[k] = round(max_field_counts.get(k, 0) / all_field_counts[k], 2)
-
-    LOGGER.info("Field relevance (%% of instances where field was max similarity):")
-    LOGGER.info(field_relevance)
 
 
 if __name__ == "__main__":
@@ -192,14 +172,28 @@ if __name__ == "__main__":
         required=True,
     )
     parser.add_argument(
-        "-s",
-        "--search_terms",
-        nargs="+",
-        help="The search terms for which to compute vertical rankings.",
-        required=False,
+        "-b",
+        "--business_id",
+        type=int,
+        help="Business ID of the experience to test.",
+        required=True,
     )
     parser.add_argument(
-        "-b",
+        "-l",
+        "--limit",
+        type=int,
+        help="Number of search terms to include.",
+        required=False,
+        default=500,
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        help="The name of the output JSON file.",
+        default="comparison.json",
+    )
+    parser.add_argument(
         "--boost_file",
         type=str,
         help="The name of the JSON file to read boosts dict from.",
@@ -207,30 +201,20 @@ if __name__ == "__main__":
         default=None,
     )
     parser.add_argument(
-        "-i",
         "--intents_file",
         type=str,
         help="The name of the JSON file to read intents dict from.",
         required=False,
         default=None,
     )
+    parser.add_argument(
+        "--semantic_file",
+        type=str,
+        help="The name of the JSON file to read semantic fields dict from.",
+        required=False,
+        default=None,
+    )
     args = parser.parse_args()
-
-    if not args.search_terms:
-        LOGGER.info("Getting top 100 search terms by search volume...")
-        query = """
-            select tokenizer_normalized_query, count(distinct query_id)
-            from log_federator_requests
-            where date(dd) > date_add('day', -7, now())
-            and answers_key = '{}'
-            group by 1
-            order by 2 desc
-            limit 100
-        """.format(
-            args.experience_key
-        )
-        df = _get_data_from_presto(query, PRESTO_USER, PRESTO_HOST)
-        args.search_terms = df["tokenizer_normalized_query"].values.tolist()
-        LOGGER.info("Done.")
+    LOGGER.info(args)
 
     main(args)
