@@ -7,6 +7,8 @@ import requests
 import pandas as pd
 from scipy.spatial.distance import cosine
 
+PRIORITY_FIELDS = ["name", "filter_value"]
+
 
 def get_liveapi_response(search_term, yext_client, experience_key):
     results = yext_client.search_answers_universal(query=search_term, experience_key=experience_key)
@@ -51,20 +53,28 @@ def _get_embeddings(query, values):
     query = re.sub("[^\w\s]", "", query)
     values = [re.sub("[^\w\s]", "", value) for value in values]
 
+    # Get only unique values to embed
+    unique = list(set([query] + values))
+
     # Get embeddings of query and all first result values
-    embeds = _embed([query] + values)
+    embeds = _embed(unique)
+
+    # Map embeddings back to original unique values
+    embeds_dict = dict(zip(unique, embeds))
 
     # Get embedding of query
-    query_embed = embeds[0]
-    embeds = embeds[1:]
+    query_embed = embeds_dict[query]
 
     # Get embeddings of first result values
+    flat_value_embeds = [embeds_dict[value] for value in values]
+
+    # Unflatten values back into list of list
     value_embeds = []
     for length in lengths:
-        value_embeds.append(embeds[:length])
-        embeds = embeds[length:]
+        value_embeds.append(flat_value_embeds[:length])
+        flat_value_embeds = flat_value_embeds[length:]
 
-    return query_embed, value_embeds
+    return query_embed, value_embeds, len(unique)
 
 
 def _similarity(embed_a, embed_b):
@@ -178,51 +188,45 @@ def parse_highlighted_fields(
     vertical_id, first_result, filter_values, vertical_intents, semantic_fields
 ):
 
+    matches = {}
+
     # Initialize with vertical intents
-    matched_values = vertical_intents
-    matched_fields = ["vertical_intent"] * len(matched_values)
+    for intent in vertical_intents:
+        matches[intent] = matches.get(intent, []) + ["vertical_intent"]
 
     # Add NLP filter values to values to consider
-    matched_values.extend(filter_values)
-    matched_fields.extend(["filter_value"] * len(filter_values))
+    for filter in filter_values:
+        matches[filter] = matches.get(filter, []) + ["filter_value"]
 
     # Try to append the name of the first result by default
     name_value = first_result.get("data", {}).get("name", None)
     if name_value:
-        matched_values.append(name_value)
-        matched_fields.append("name")
+        matches[name_value] = matches.get(name_value, []) + ["name"]
 
     # Append the name of the vertical ID by default
-    matched_values.append(_clean_vertical_id(vertical_id))
-    matched_fields.append("vertical_name")
-
-    # Try to append the name of the first result by default
-    name_value = first_result.get("data", {}).get("name", None)
-    if name_value:
-        matched_values.append(name_value)
-        matched_fields.append("name")
+    clean_vertical_id = _clean_vertical_id(vertical_id)
+    matches[clean_vertical_id] = matches.get(clean_vertical_id, []) + ["vertical_id"]
 
     # Return just vertical intents if the result JSON is None
     if not first_result:
         LOGGER.warning("Empty first result JSON for vertical ID: {}.".format(vertical_id))
-        return matched_values, matched_fields
+        return matches
 
     # If semantic fields are provided, only pull values of semantic fields
     if semantic_fields:
         data = first_result.get("data", {})
         semantic_values, semantic_fields_found = _get_semantic_fields(data, semantic_fields)
-        matched_values.extend(semantic_values)
-        matched_fields.extend(semantic_fields_found)
+        for v, f in zip(semantic_values, semantic_fields_found):
+            matches[v] = matches.get(v, []) + [f]
 
     # Otherwise, recursively get field, value pairs from highlightedFields
     else:
         highlights = first_result.get("highlightedFields", {})
         highlighted_values, highlighted_fields = _parse_value_recursively(None, highlights)
-        matched_values.extend(highlighted_values)
-        matched_fields.extend(highlighted_fields)
+        for v, f in zip(highlighted_values, highlighted_fields):
+            matches[v] = matches.get(v, []) + [f]
 
-    assert len(matched_values) == len(matched_fields)
-    return matched_values, matched_fields
+    return matches
 
 
 def get_new_vertical_ranks(
@@ -235,7 +239,7 @@ def get_new_vertical_ranks(
     vertical_boosts={},
 ):
     # Get highlighed field values of the top entity result for each vertical
-    all_values_and_fields = [
+    all_matches = [
         parse_highlighted_fields(
             vert_id,
             result,
@@ -245,12 +249,10 @@ def get_new_vertical_ranks(
         )
         for vert_id, result, filters in zip(vertical_ids, first_results, filter_values)
     ]
-    all_values = [i[0] for i in all_values_and_fields]
-    all_fields = [i[1] for i in all_values_and_fields]
+    all_values = [list(vertical_matches.keys()) for vertical_matches in all_matches]
 
     # Embed the query and the values of each first result
-    query_embed, value_embeds = _get_embeddings(query, all_values)
-    embeddings_calculated = len(_flatten(all_values)) + 1
+    query_embed, value_embeds, embeddings_calculated = _get_embeddings(query, all_values)
 
     # Compute similarities between query and matched values
     similarities = [[_similarity(query_embed, v_i) for v_i in v] for v in value_embeds]
@@ -265,14 +267,19 @@ def get_new_vertical_ranks(
     # Get the max similarity
     max_similarities = [max(l, default=-1) for l in similarities]
 
-    # Get the index of the max similarity, and the corresponding field and value
+    # Get the index of the max similarity, and the corresponding value
     idx_max_similarities = [
         l.index(i) if i != -1 else -1 for l, i in zip(similarities, max_similarities)
     ]
     max_values = [l[i] if i != -1 else None for l, i in zip(all_values, idx_max_similarities)]
-    max_fields = [l[i] if i != -1 else None for l, i in zip(all_fields, idx_max_similarities)]
 
-    # Get new ranking based on fields and similarities
+    # Get all fields that contained the max value
+    max_fields = [
+        vertical_matches.get(value, None)
+        for vertical_matches, value in zip(all_matches, max_values)
+    ]
+
+    # Get new ranking based on fields with match and similarities
     new_rank = get_new_rank(max_fields, max_similarities)
 
     assert len(first_results) == len(max_values) == len(max_fields) == len(new_rank)
@@ -290,11 +297,11 @@ def get_new_rank(max_fields, max_similarities):
     if not max_fields or not max_similarities:
         return []
 
-    # Determine if match is on a "priority field"
-    is_priority = [1 if (field == "filter_value" or field == "name") else 0 for field in max_fields]
+    # Determine if vertical has a match on a priority field
+    has_priority = [0 if set(fields).isdisjoint(PRIORITY_FIELDS) else 1 for fields in max_fields]
 
     # Rank by similarity first, tiebreak using priority field
-    df = pd.DataFrame.from_records(list(zip(max_similarities, is_priority)))
+    df = pd.DataFrame.from_records(list(zip(max_similarities, has_priority)))
     df["rank"] = df.sort_values([1], ascending=False)[0].rank(method="first", ascending=False)
 
     return [int(i) - 1 for i in df["rank"].to_list()]
