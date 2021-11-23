@@ -52,20 +52,18 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
         response = get_liveapi_response(QUERY, yext_client, EXPERIENCE_KEY)
     except:
         raise ValueError("Invalid Experience Key or API Key.")
+    modules = [module for module in response["modules"] if module["source"] == "KNOWLEDGE_MANAGER"]
     first_results = [
         module["results"][0]
-        for module in response["modules"]
-        if module["source"] == "KNOWLEDGE_MANAGER"
+        for module in modules
     ]
     vertical_ids = [
         module["verticalConfigId"]
-        for module in response["modules"]
-        if module["source"] == "KNOWLEDGE_MANAGER"
+        for module in modules
     ]
     query_filters = [
         module["appliedQueryFilters"]
-        for module in response["modules"]
-        if module["source"] == "KNOWLEDGE_MANAGER"
+        for module in modules
     ]
     filter_values = [[f_i["displayValue"] for f_i in f] for f in query_filters]
 
@@ -111,8 +109,8 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
         # Get the index of the new item at old_rank
         new_rank = new_ranks.index(old_rank)
 
-        original_module = response["modules"][old_rank]
-        reordered_module = response["modules"][new_rank]
+        original_module = modules[old_rank]
+        reordered_module = modules[new_rank]
         delta = new_rank - old_rank
 
         if delta > 0:
