@@ -1,7 +1,5 @@
 import logging
 
-from numpy import floor
-
 LOGGER = logging.getLogger(__name__)
 
 import math
