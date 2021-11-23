@@ -53,18 +53,9 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
     except:
         raise ValueError("Invalid Experience Key or API Key.")
     modules = [module for module in response["modules"] if module["source"] == "KNOWLEDGE_MANAGER"]
-    first_results = [
-        module["results"][0]
-        for module in modules
-    ]
-    vertical_ids = [
-        module["verticalConfigId"]
-        for module in modules
-    ]
-    query_filters = [
-        module["appliedQueryFilters"]
-        for module in modules
-    ]
+    first_results = [module["results"][0] for module in modules]
+    vertical_ids = [module["verticalConfigId"] for module in modules]
+    query_filters = [module["appliedQueryFilters"] for module in modules]
     filter_values = [[f_i["displayValue"] for f_i in f] for f in query_filters]
 
     # Get autocomplete suggestions for each vertical key
@@ -127,7 +118,7 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
             **Top Result:** {original_module['results'][0]['data']['name']}\n
             **Original Rank:** {old_rank}\n
             **Similarity:** {max_similarities[old_rank]}\n
-            **Max Field:** {max_fields[old_rank]}\n
+            **Max Fields:** {max_fields[old_rank]}\n
             **Max Field Value:** {max_values[old_rank]}
             """
             )
@@ -138,7 +129,7 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
             **Top Result:** {reordered_module['results'][0]['data']['name']}\n
             **Reordered Rank:** {old_rank} (Δ{delta})\n
             **Similarity:** {sorted(max_similarities, reverse=True)[old_rank]}\n
-            **Max Field:** {max_fields[new_rank]}\n
+            **Max Fields:** {max_fields[new_rank]}\n
             **Max Field Value:** {max_values[new_rank]}
             """
             )

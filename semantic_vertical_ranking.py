@@ -1,7 +1,10 @@
 import logging
 
+from numpy import floor
+
 LOGGER = logging.getLogger(__name__)
 
+import math
 import re
 import requests
 import pandas as pd
@@ -261,9 +264,6 @@ def get_new_vertical_ranks(
     boost_vector = [vertical_boosts.get(id_, 0) for id_ in vertical_ids]
     similarities = [[sim + boost for sim in l] for l, boost in zip(similarities, boost_vector)]
 
-    # Round to 2 decimals (slightly more ties)
-    similarities = [[round(similarity, 2) for similarity in l] for l in similarities]
-
     # Get the max similarity
     max_similarities = [max(l, default=-1) for l in similarities]
 
@@ -280,7 +280,7 @@ def get_new_vertical_ranks(
     ]
 
     # Get new ranking based on fields with match and similarities
-    new_rank = get_new_rank(max_fields, max_similarities)
+    new_rank = get_new_rank(max_fields, max_similarities, bucketing=True)
 
     assert len(first_results) == len(max_values) == len(max_fields) == len(new_rank)
     return (
@@ -292,10 +292,14 @@ def get_new_vertical_ranks(
     )
 
 
-def get_new_rank(max_fields, max_similarities):
+def get_new_rank(max_fields, max_similarities, bucketing=False):
 
     if not max_fields or not max_similarities:
         return []
+
+    # If bucketing, each value down to nearest 1/10th decimal place
+    if bucketing:
+        max_similarities = [math.floor(similarity * 10) / 10 for similarity in max_similarities]
 
     # Determine if vertical has a match on a priority field
     has_priority = [0 if set(fields).isdisjoint(PRIORITY_FIELDS) else 1 for fields in max_fields]
