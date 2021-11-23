@@ -41,38 +41,26 @@ def _get_data_from_presto(query, PRESTO_USER=PRESTO_USER, PRESTO_HOST=PRESTO_HOS
     return query_export
 
 
-def compile_comparison_json(answers_key, queries, responses, new_ranks, output_file):
-    def _reorder(modules, new_rank):
-        return [module for i, module in sorted(zip(new_rank, modules), key=lambda x: x[0])]
+def get_comparison_json(query, response, modules, new_ranks):
+    def _reorder(old_modules, new_rank):
+        return [module for i, module in sorted(zip(new_rank, old_modules), key=lambda x: x[0])]
 
-    def _replace(response, reordered_modules):
+    def _replace(response, new_modules):
         return {
             "businessId": response["businessId"],
             "failedVerticals": [],
-            "modules": reordered_modules,
+            "modules": new_modules,
             "queryId": response["queryId"],
             "searchIntents": response["searchIntents"],
             "locationBias": response["locationBias"],
-            "directAnswer": response.get("directAnswer", "")
+            "directAnswer": response.get("directAnswer", ""),
         }
 
-
-    # Get new order of modules
-    modules = [response["modules"] for response in responses]
-    reordered_modules = [_reorder(module, new_rank) for module, new_rank in zip(modules, new_ranks)]
-
-    comparison_json = {}
-    comparison_json[answers_key] = [
-        {
-            "query": query,
-            "oldResult": {"query": query, "result": response},
-            "newResult": {"query": query, "result": _replace(response, reordered_module)},
-        }
-        for query, response, reordered_module in zip(queries, responses, reordered_modules)
-    ]
-
-    with open(output_file, "w") as f:
-        json.dump(comparison_json, f)
+    return {
+        "query": query,
+        "oldResult": {"query": query, "result": _replace(response, modules)},
+        "newResult": {"query": query, "result": _replace(response, _reorder(modules, new_ranks))},
+    }
 
 
 def get_top_search_terms_from_presto(answers_key, business_id, count=500):
@@ -83,6 +71,8 @@ def get_top_search_terms_from_presto(answers_key, business_id, count=500):
         where date(dd) > date_add('day', -7, now())
         and answers_key = '{answers_key}'
         and business_id = {business_id}
+        and tokenizer_normalized_query is not null
+        and tokenizer_normalized_query != ' '
         group by 1
         order by 2 desc
         limit {count}
@@ -95,11 +85,15 @@ def get_top_search_terms_from_presto(answers_key, business_id, count=500):
 
 def main(args):
 
+    # Fetch top [limit] search terms by search volume from Presto
     search_terms = get_top_search_terms_from_presto(
         args.experience_key, args.business_id, args.limit
     )
 
+    # Initialize Yext client
     yext_client = YextClient(args.api_key)
+
+    # Get vertical boosts and intents if file provided
     vertical_boosts = {}
     vertical_intents = {}
     if args.boost_file:
@@ -107,8 +101,9 @@ def main(args):
     if args.intents_file:
         vertical_intents = json.load(open(args.intents_file))
 
-    responses = []
-    new_ranks = []
+    # Initialize final comparison JSON
+    comparison_json = {}
+    comparison_json[args.experience_key] = []
 
     # Get LiveAPI responses for all queries
     LOGGER.info("Reranking...")
@@ -117,28 +112,20 @@ def main(args):
         for query in search_terms:
             # Get Live API response for each search term
             response = get_liveapi_response(query, yext_client, args.experience_key)
-            responses.append(response)
 
-            # Pull out top results, vertical IDs, and filter values for each module returned
-            first_results = [
-                module["results"][0]
-                for module in response["modules"]
-                if module["source"] == "KNOWLEDGE_MANAGER"
+            # Keep just KM modules
+            modules = [
+                module for module in response["modules"] if module["source"] == "KNOWLEDGE_MANAGER"
             ]
-            vertical_ids = [
-                module["verticalConfigId"]
-                for module in response["modules"]
-                if module["source"] == "KNOWLEDGE_MANAGER"
-            ]
-            query_filters = [
-                module["appliedQueryFilters"]
-                for module in response["modules"]
-                if module["source"] == "KNOWLEDGE_MANAGER"
-            ]
+
+            # Pull out top results, vertical IDs, and filter values for each KM module returned
+            first_results = [module["results"][0] for module in modules]
+            vertical_ids = [module["verticalConfigId"] for module in modules]
+            query_filters = [module["appliedQueryFilters"] for module in modules]
             filter_values = [[f_i["displayValue"] for f_i in f] for f in query_filters]
 
             # Get new rank of verticals for query
-            new_rank = get_new_vertical_ranks(
+            new_ranks = get_new_vertical_ranks(
                 query,
                 vertical_ids,
                 first_results,
@@ -147,11 +134,15 @@ def main(args):
                 vertical_intents=vertical_intents,
                 vertical_boosts=vertical_boosts,
             )[0]
-            new_ranks.append(new_rank)
+
+            query_json = get_comparison_json(query, response, modules, new_ranks)
+            comparison_json[args.experience_key].append(query_json)
 
             progress.update(rerank_progress, advance=1)
+    
+    with open(args.output, "w") as f:
+        json.dump(comparison_json, f)
 
-    compile_comparison_json(args.experience_key, search_terms, responses, new_ranks, args.output)
     LOGGER.info("Done.")
 
 
