@@ -238,6 +238,7 @@ def get_new_vertical_ranks(
     semantic_fields={},
     vertical_intents={},
     vertical_boosts={},
+    bucket=False
 ):
     # Get highlighed field values of the top entity result for each vertical
     all_matches = [
@@ -278,7 +279,7 @@ def get_new_vertical_ranks(
     ]
 
     # Get new ranking based on fields with match and similarities
-    new_rank = get_new_rank(max_fields, max_similarities, bucketing=True)
+    new_rank = get_new_rank(max_fields, max_similarities, bucketing=bucket)
 
     assert len(first_results) == len(max_values) == len(max_fields) == len(new_rank)
     return (

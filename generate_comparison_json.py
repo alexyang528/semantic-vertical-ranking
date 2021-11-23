@@ -133,13 +133,14 @@ def main(args):
                 semantic_fields={},
                 vertical_intents=vertical_intents,
                 vertical_boosts=vertical_boosts,
+                bucket=args.bucket,
             )[0]
 
             query_json = get_comparison_json(query, response, modules, new_ranks)
             comparison_json[args.experience_key].append(query_json)
 
             progress.update(rerank_progress, advance=1)
-    
+
     with open(args.output, "w") as f:
         json.dump(comparison_json, f)
 
@@ -168,6 +169,12 @@ if __name__ == "__main__":
         type=int,
         help="Business ID of the experience to test.",
         required=True,
+    )
+    parser.add_argument(
+        "--bucket",
+        action="store_true",
+        help="Whether or not to bucket similarities to 1/10th place.",
+        default=False,
     )
     parser.add_argument(
         "-l",
