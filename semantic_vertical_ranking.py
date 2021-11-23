@@ -48,7 +48,8 @@ def _get_embeddings(query, values):
     values = _flatten(values)
 
     # Strip and normalize all values (remove punctuation, etc.)
-    values = [re.sub("[^A-Za-z0-9]+", "", value) for value in values]
+    query = re.sub("[^\w\s]", "", query)
+    values = [re.sub("[^\w\s]", "", value) for value in values]
 
     # Get embeddings of query and all first result values
     embeds = _embed([query] + values)
@@ -78,6 +79,17 @@ def _flatten(values):
         else:
             out.append(value)
     return out
+
+
+def _clean_vertical_id(vertical_id):
+    # Convert camel case into space-separated words
+    cleaned_vertical_id = re.sub("([a-z])([A-Z])", "\g<1> \g<2>", vertical_id)
+    # Replace - and _
+    cleaned_vertical_id = cleaned_vertical_id.replace("-", " ")
+    cleaned_vertical_id = cleaned_vertical_id.replace("_", " ")
+    # Lowercase
+    cleaned_vertical_id = cleaned_vertical_id.lower()
+    return cleaned_vertical_id
 
 
 def get_snippet(value, matched_subs, chars_before=50, chars_after=50, use_dense=True):
@@ -174,6 +186,22 @@ def parse_highlighted_fields(
     matched_values.extend(filter_values)
     matched_fields.extend(["filter_value"] * len(filter_values))
 
+    # Try to append the name of the first result by default
+    name_value = first_result.get("data", {}).get("name", None)
+    if name_value:
+        matched_values.append(name_value)
+        matched_fields.append("name")
+
+    # Append the name of the vertical ID by default
+    matched_values.append(_clean_vertical_id(vertical_id))
+    matched_fields.append("vertical_name")
+
+    # Try to append the name of the first result by default
+    name_value = first_result.get("data", {}).get("name", None)
+    if name_value:
+        matched_values.append(name_value)
+        matched_fields.append("name")
+
     # Return just vertical intents if the result JSON is None
     if not first_result:
         LOGGER.warning("Empty first result JSON for vertical ID: {}.".format(vertical_id))
@@ -231,8 +259,13 @@ def get_new_vertical_ranks(
     boost_vector = [vertical_boosts.get(id_, 0) for id_ in vertical_ids]
     similarities = [[sim + boost for sim in l] for l, boost in zip(similarities, boost_vector)]
 
-    # Get the index of the max similarity, and the corresponding field and value
+    # Round to 2 decimals (slightly more ties)
+    similarities = [[round(similarity, 2) for similarity in l] for l in similarities]
+
+    # Get the max similarity
     max_similarities = [max(l, default=-1) for l in similarities]
+
+    # Get the index of the max similarity, and the corresponding field and value
     idx_max_similarities = [
         l.index(i) if i != -1 else -1 for l, i in zip(similarities, max_similarities)
     ]
@@ -245,7 +278,6 @@ def get_new_vertical_ranks(
     assert len(first_results) == len(max_values) == len(max_fields) == len(new_rank)
     return (
         new_rank,
-        _flatten(all_fields),
         max_fields,
         max_values,
         max_similarities,
@@ -254,6 +286,10 @@ def get_new_vertical_ranks(
 
 
 def get_new_rank(max_fields, max_similarities):
+
+    if not max_fields or not max_similarities:
+        return []
+
     # Determine if match is on a "priority field"
     is_priority = [1 if (field == "filter_value" or field == "name") else 0 for field in max_fields]
 

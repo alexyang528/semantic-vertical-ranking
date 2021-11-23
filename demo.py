@@ -87,7 +87,7 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
     #         print(vertical_intents[vertical])
 
     # Get new vertical ranks and fields/ values driving change
-    new_ranks, _, max_fields, max_values, max_similarities, embeddings = get_new_vertical_ranks(
+    new_ranks, max_fields, max_values, max_similarities, embeddings = get_new_vertical_ranks(
         QUERY,
         vertical_ids,
         first_results,
@@ -106,8 +106,11 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
     with right_col:
         st.write("## Reordered Results")
 
-    for old_rank, _ in enumerate(new_ranks):
+    old_rank = 0
+    while old_rank in new_ranks:
+        # Get the index of the new item at old_rank
         new_rank = new_ranks.index(old_rank)
+
         original_module = response["modules"][old_rank]
         reordered_module = response["modules"][new_rank]
         delta = new_rank - old_rank
@@ -141,4 +144,5 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
             **Max Field Value:** {max_values[new_rank]}
             """
             )
+        old_rank += 1
     st.write("### Embeddings Calculated: {}".format(embeddings))
