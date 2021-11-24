@@ -248,7 +248,7 @@ def svr(query, vertical_ids, first_results, filter_values, vertical_intents={}, 
     return max_similarities, max_values, max_fields, embeddings_calculated
 
 
-def svr_max_result_name(query, result_names):
+def svr_result_name(query, result_names):
 
     # Embed the query and the values of each first result
     query_embed, value_embeds, embeddings_calculated = _get_embeddings(query, result_names)
@@ -267,7 +267,7 @@ def svr_max_result_name(query, result_names):
     return max_similarities, max_values, max_position, embeddings_calculated
 
 
-def svr_dcg_result_name(query, result_names):
+def dcg_result_name(query, result_names):
 
     def dcg_x(scores, x):
         return sum([score / log(i+2, 2) for i, score in enumerate(scores[:x])])

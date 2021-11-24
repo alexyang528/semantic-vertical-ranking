@@ -5,8 +5,8 @@ from semantic_vertical_ranking import (
     get_liveapi_response,
     get_new_rank,
     svr,
-    svr_dcg_result_name,
-    svr_max_result_name,
+    svr_result_name,
+    dcg_result_name,
 )
 
 """
@@ -21,7 +21,18 @@ EXPERIENCE_KEY = st.text_input("Experience Key")
 QUERY = st.text_input("Query")
 VERTICALS = st.text_input("Vertical Keys for Boosting and Intents (Comma Separated)")
 VERTICALS = [v.strip() for v in VERTICALS.split(",") if v]
-PRIORITY_FIELDS = ["name", "filter_value"]
+PRIORITY_FIELDS = ["name", "filter_value", "vertical_id"]
+
+
+def _keys_exists(element, *keys):
+    _element = element
+    for key in keys:
+        try:
+            _element = _element[key]
+        except KeyError:
+            return False
+    return True
+
 
 st.sidebar.write("## Vertical Ranking Components")
 has_entity_type_filter = st.sidebar.checkbox("Has Entity Type Filter")
@@ -66,13 +77,13 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
     # Get filter criteria:
     filter_criteria = []
     if has_entity_type_filter:
-        entity_type_filter = [any([filter.get("filter", {}).get("builtin.entityType") for filter in l if filter]) for l in query_filters]
+        entity_type_filter = [any([_keys_exists(filter, "filter", "builtin.entityType") for filter in l if filter]) for l in query_filters]
         filter_criteria.append(entity_type_filter)
     if has_near_me_filter:
-        near_me_filter = [any([filter.get("filter", {}).get("builtin.location", {}).get("$near") for filter in l if filter]) for l in query_filters]
+        near_me_filter = [any([_keys_exists(filter, "filter", "builtin.location", "$near") for filter in l if filter]) for l in query_filters]
         filter_criteria.append(near_me_filter)
     if has_location_filter:
-        location_filter = [any([filter.get("filter", {}).get("builtin.location", {}).get("$eq") for filter in l if filter]) for l in query_filters]
+        location_filter = [any([_keys_exists(filter, "filter", "builtin.location", "$near") for filter in l if filter]) for l in query_filters]
         filter_criteria.append(location_filter)
 
     # Get Semantic Vertical Relevance (SVR)
@@ -88,17 +99,9 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
         is_priority_fields = [
             0 if set(v_max_fields).isdisjoint(PRIORITY_FIELDS) else 1 for v_max_fields in max_fields
         ]
-        # Apply boosts
-        scores = [
-            score + vertical_boosts.get(vertical_id, 0)
-            for score, vertical_id in zip(scores, vertical_ids)
-        ]
-        # Apply bucketing
-        if bucket:
-            scores = [floor(score * 10) / 10 for score in scores]
+        score_criteria = [scores, is_priority_fields]
 
-        # Get new rank and templates
-        new_ranks = get_new_rank(*filter_criteria, scores, is_priority_fields)
+        # Set display template
         template = """
             **Vertical Key:** {}\n
             **Top Result:** {}\n
@@ -124,14 +127,14 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
         result_names = [names[:10] for names in result_names]
 
         # Get scores
-        scores, max_values, max_position, embeds = svr_max_result_name(QUERY, result_names)
-
-        # Get new rank and templates
-        new_ranks = get_new_rank(*filter_criteria, scores)
+        scores, max_values, max_position, embeds = svr_result_name(QUERY, result_names)
+        score_criteria = [scores]
+        
+        # Set display template
         template = """
             **Vertical Key:** {}\n
             **Original Rank:** {}\n
-            **Similarity:** {}\n
+            **Semantic Vertical Relevance:** {}\n
             **Top Result Name:** {}\n
             **Top Result Position:** {}
         """
@@ -152,17 +155,27 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
         result_names = [names[:10] for names in result_names]
 
         # Get scores
-        scores, max_values, max_position, embeds = svr_dcg_result_name(QUERY, result_names)
+        scores, max_values, max_position, embeds = dcg_result_name(QUERY, result_names)
+        score_criteria = [scores]
 
-        # Get new rank and templates
-        new_ranks = get_new_rank(*filter_criteria, scores)
+        # Set display template
         template = """
             **Vertical Key:** {}\n
             **Original Rank:** {}\n
-            **Similarity:** {}\n
+            **Vertical DCG Score:** {}\n
             **Top Result Name:** {}\n
             **Top Result Position:** {}
         """
+
+    # Apply boosts and bucketing
+    scores = [
+        score + vertical_boosts.get(vertical_id, 0)
+        for score, vertical_id in zip(scores, vertical_ids)
+    ]
+    if bucket:
+        scores = [floor(score * 10) / 10 for score in scores]
+
+    new_ranks = get_new_rank(*filter_criteria, *score_criteria)
 
     # Remove line breaks from values for better presentation
     max_values = [i.replace("\n", " ") if i else None for i in max_values]
