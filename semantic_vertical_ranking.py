@@ -2,36 +2,17 @@ import logging
 
 LOGGER = logging.getLogger(__name__)
 
-import math
 import re
 import requests
 import pandas as pd
+from math import log
 from scipy.spatial.distance import cosine
-
-PRIORITY_FIELDS = ["name", "filter_value"]
 
 
 def get_liveapi_response(search_term, yext_client, experience_key):
     results = yext_client.search_answers_universal(query=search_term, experience_key=experience_key)
     response = results.raw_response["response"]
     return response
-
-
-def get_autocomplete_suggestions(business_id, experience_key, api_key, vertical_id, search_term=""):
-    url = "https://liveapi.yext.com/v2/accounts/{accountId}/answers/vertical/autocomplete".format(
-        accountId=business_id
-    )
-    params = {
-        "v": "20161012",
-        "api_key": api_key,
-        "experienceKey": experience_key,
-        "verticalKey": vertical_id,
-        "locale": "en",
-        "input": search_term,
-    }
-    response = requests.get(url, params).json()["response"]
-    vertical_prompts = [value["value"] for value in response["results"]]
-    return vertical_prompts
 
 
 def _embed(strings: list) -> list:
@@ -51,8 +32,8 @@ def _get_embeddings(query, values):
     values = _flatten(values)
 
     # Strip and normalize all values (remove punctuation, etc.)
-    query = re.sub("[^\w\s]", "", query)
-    values = [re.sub("[^\w\s]", "", value) for value in values]
+    query = re.sub("[^\w\s]", " ", query)
+    values = [re.sub("[^\w\s]", " ", value) for value in values]
 
     # Get only unique values to embed
     unique = list(set([query] + values))
@@ -230,26 +211,17 @@ def parse_highlighted_fields(
     return matches
 
 
-def get_new_vertical_ranks(
-    query,
-    vertical_ids,
-    first_results,
-    filter_values,
-    semantic_fields={},
-    vertical_intents={},
-    vertical_boosts={},
-    bucket=False
-):
+def svr(query, vertical_ids, first_results, filter_values, vertical_intents={}, semantic_fields={}):
     # Get highlighed field values of the top entity result for each vertical
     all_matches = [
         parse_highlighted_fields(
-            vert_id,
+            vertical_id,
             result,
             filters,
-            vertical_intents.get(vert_id, []),
-            semantic_fields.get(vert_id, []),
+            vertical_intents.get(vertical_id, []),
+            semantic_fields.get(vertical_id, [])
         )
-        for vert_id, result, filters in zip(vertical_ids, first_results, filter_values)
+        for vertical_id, result, filters in zip(vertical_ids, first_results, filter_values)
     ]
     all_values = [list(vertical_matches.keys()) for vertical_matches in all_matches]
 
@@ -259,52 +231,82 @@ def get_new_vertical_ranks(
     # Compute similarities between query and matched values
     similarities = [[_similarity(query_embed, v_i) for v_i in v] for v in value_embeds]
 
-    # Boost if a boost vector is provided
-    boost_vector = [vertical_boosts.get(id_, 0) for id_ in vertical_ids]
-    similarities = [[sim + boost for sim in l] for l, boost in zip(similarities, boost_vector)]
-
     # Get the max similarity
     max_similarities = [max(l, default=-1) for l in similarities]
 
-    # Get the index of the max similarity, and the corresponding value
+    # Get the index of the max similarity
     idx_max_similarities = [
         l.index(i) if i != -1 else -1 for l, i in zip(similarities, max_similarities)
     ]
+    # Get value and field(s) providing the top similarity value
     max_values = [l[i] if i != -1 else None for l, i in zip(all_values, idx_max_similarities)]
-
-    # Get all fields that contained the max value
     max_fields = [
         vertical_matches.get(value, None)
         for vertical_matches, value in zip(all_matches, max_values)
     ]
 
-    # Get new ranking based on fields with match and similarities
-    new_rank = get_new_rank(max_fields, max_similarities, bucketing=bucket)
-
-    assert len(first_results) == len(max_values) == len(max_fields) == len(new_rank)
-    return (
-        new_rank,
-        max_fields,
-        max_values,
-        max_similarities,
-        embeddings_calculated,
-    )
+    return max_similarities, max_values, max_fields, embeddings_calculated
 
 
-def get_new_rank(max_fields, max_similarities, bucketing=False):
+def svr_max_result_name(query, result_names):
 
-    if not max_fields or not max_similarities:
+    # Embed the query and the values of each first result
+    query_embed, value_embeds, embeddings_calculated = _get_embeddings(query, result_names)
+
+    # Compute similarities between query and matched values
+    similarities = [[_similarity(query_embed, v_i) for v_i in v] for v in value_embeds]
+
+    # Get the max similarity and index of max similarity
+    max_similarities = [max(l, default=-1) for l in similarities]
+    max_position = [
+        l.index(i) if i != -1 else -1 for l, i in zip(similarities, max_similarities)
+    ]
+    # Get result name and position providing the top similarity value
+    max_values = [l[i] if i != -1 else None for l, i in zip(result_names, max_position)]
+
+    return max_similarities, max_values, max_position, embeddings_calculated
+
+
+def svr_dcg_result_name(query, result_names):
+
+    def dcg_x(scores, x):
+        return sum([score / log(i+2, 2) for i, score in enumerate(scores[:x])])
+
+    # Embed the query and the values of each first result
+    query_embed, value_embeds, embeddings_calculated = _get_embeddings(query, result_names)
+
+    # Compute similarities between query and matched values
+    similarities = [[_similarity(query_embed, v_i) for v_i in v] for v in value_embeds]
+
+    # Get the DCG (discount cumulative gain) for first 10 results per vertical
+    dcg = [dcg_x(similarity, 10) for similarity in similarities]
+
+    # Get the max similarity and index of max similarity
+    max_similarities = [max(l, default=-1) for l in similarities]
+    max_position = [
+        l.index(i) if i != -1 else -1 for l, i in zip(similarities, max_similarities)
+    ]
+    # Get result name and position providing the top similarity value
+    max_values = [l[i] if i != -1 else None for l, i in zip(result_names, max_position)]
+
+    return dcg, max_values, max_position, embeddings_calculated
+
+
+def get_new_rank(*ranking_criteria):
+
+    # Return empty ranking list if length of ranking criteria is 0
+    if any([len(arg) for arg in ranking_criteria]) == 0:
         return []
 
-    # If bucketing, each value down to nearest 1/10th decimal place
-    if bucketing:
-        max_similarities = [math.floor(similarity * 10) / 10 for similarity in max_similarities]
+    # Check that all ranking criteria are the same length
+    if not len(set([len(arg) for arg in ranking_criteria])) == 1:
+        LOGGER.error("Args for new ranking must all be equal length.")
+        raise ValueError
 
-    # Determine if vertical has a match on a priority field
-    has_priority = [0 if set(fields).isdisjoint(PRIORITY_FIELDS) else 1 for fields in max_fields]
+    df = pd.DataFrame(ranking_criteria).T
 
-    # Rank by similarity first, tiebreak using priority field
-    df = pd.DataFrame.from_records(list(zip(max_similarities, has_priority)))
-    df["rank"] = df.sort_values([1], ascending=False)[0].rank(method="first", ascending=False)
+    df["rank"] = df.sort_values(df.columns.to_list(), ascending=False)[0].rank(
+        method="first", ascending=False
+    )
 
     return [int(i) - 1 for i in df["rank"].to_list()]
