@@ -1,3 +1,5 @@
+import json
+import requests
 import streamlit as st
 from yext import YextClient
 from math import floor
@@ -38,7 +40,7 @@ st.sidebar.write("## Vertical Ranking Components")
 has_entity_type_filter = st.sidebar.checkbox("Has Entity Type Filter")
 has_near_me_filter = st.sidebar.checkbox("Has Near Me Filter")
 has_location_filter = st.sidebar.checkbox("Has Location Filter")
-score_method = st.sidebar.radio(label="Scoring Method", options=("SVR", "SVR Names", "SVR DCG"))
+score_method = st.sidebar.radio(label="Scoring Method", options=("SVR", "SVR Names", "DCG"))
 
 st.sidebar.write("## General")
 bucket = st.sidebar.checkbox("Bucket Similarities")
@@ -66,6 +68,10 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
     try:
         yext_client = YextClient(YEXT_API_KEY)
         response = get_liveapi_response(QUERY, yext_client, EXPERIENCE_KEY)
+        # context = '{"store":"5673","trackingUrl":"../../../ny/brooklyn/144-n-7th-st/track-package"}'
+        # url = f'https://liveapi.yext.com/v2/accounts/me/answers/query?input={QUERY}&experienceKey={EXPERIENCE_KEY}&api_key={YEXT_API_KEY}&v=20190101&version=PRODUCTION&locale=en&sessionTrackingEnabled=true&context={context}&referrerPageUrl=&source=STANDARD&jsLibVersion=v1.9.2"'
+        # response = requests.get(url).text
+        # response = json.loads(response)["response"]
     except:
         raise ValueError("Invalid Experience Key or API Key.")
 
@@ -83,7 +89,7 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
         near_me_filter = [any([_keys_exists(filter, "filter", "builtin.location", "$near") for filter in l if filter]) for l in query_filters]
         filter_criteria.append(near_me_filter)
     if has_location_filter:
-        location_filter = [any([_keys_exists(filter, "filter", "builtin.location", "$near") for filter in l if filter]) for l in query_filters]
+        location_filter = [any([_keys_exists(filter, "filter", "builtin.location", "$eq") for filter in l if filter]) for l in query_filters]
         filter_criteria.append(location_filter)
 
     # Get Semantic Vertical Relevance (SVR)
@@ -99,7 +105,6 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
         is_priority_fields = [
             0 if set(v_max_fields).isdisjoint(PRIORITY_FIELDS) else 1 for v_max_fields in max_fields
         ]
-        score_criteria = [scores, is_priority_fields]
 
         # Set display template
         template = """
@@ -128,7 +133,6 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
 
         # Get scores
         scores, max_values, max_position, embeds = svr_result_name(QUERY, result_names)
-        score_criteria = [scores]
         
         # Set display template
         template = """
@@ -139,8 +143,8 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
             **Top Result Position:** {}
         """
 
-    # Get Semantic Vertical Relevance (SVR) with Result Names and Apply DCG
-    elif score_method == "SVR DCG":
+    # Get Discount Cumulative Gain (DCG) with Result Names
+    elif score_method == "DCG":
         # Collect inputs
         result_names = [
             [
@@ -156,7 +160,6 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
 
         # Get scores
         scores, max_values, max_position, embeds = dcg_result_name(QUERY, result_names)
-        score_criteria = [scores]
 
         # Set display template
         template = """
@@ -174,6 +177,12 @@ if YEXT_API_KEY and EXPERIENCE_KEY and QUERY:
     ]
     if bucket:
         scores = [floor(score * 10) / 10 for score in scores]
+
+    # Provide which values should be used for new ranking
+    if score_method == "SVR":
+        score_criteria = [scores, is_priority_fields]
+    else:
+        score_criteria = [scores]
 
     new_ranks = get_new_rank(*filter_criteria, *score_criteria)
 
