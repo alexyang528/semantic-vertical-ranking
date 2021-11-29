@@ -11,7 +11,7 @@ import json
 
 def stitch_comparison_jsons(args):
     LOGGER.info("Stitching before and after JSONs...")
-    
+
     with open(args.before_json, "r") as f:
         before_json = json.load(f)
         before_queries = [i["query"] for i in before_json[args.experience_key]]
@@ -31,9 +31,13 @@ def stitch_comparison_jsons(args):
         before_index = before_queries.index(query)
         after_index = after_queries.index(query)
 
+        which_result = "oldResult"
+        if args.both_after:
+            which_result = "newResult"
+
         result = {
             "query": query,
-            "oldResult": before_json[args.experience_key][before_index]["oldResult"],
+            "oldResult": before_json[args.experience_key][before_index][which_result],
             "newResult": after_json[args.experience_key][after_index]["newResult"],
         }
 
@@ -46,9 +50,7 @@ def stitch_comparison_jsons(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description=("Stitch together two comparison JSONs.")
-    )
+    parser = argparse.ArgumentParser(description="Stitch together two comparison JSONs.")
     parser.add_argument(
         "-e",
         "--experience_key",
@@ -71,11 +73,17 @@ if __name__ == "__main__":
         required=True,
     )
     parser.add_argument(
+        "--both_after",
+        action="store_true",
+        help="Whether to use the 'after' column from both JSONs.",
+        default=False,
+    )
+    parser.add_argument(
         "-o",
         "--output",
         type=str,
         help="The name of the output JSON file.",
-        default="stitched.json"
+        default="stitched.json",
     )
     args = parser.parse_args()
     LOGGER.info(args)
