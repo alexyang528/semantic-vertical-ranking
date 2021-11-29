@@ -10,12 +10,25 @@ import argparse
 import json
 import os
 import pandas as pd
+from math import floor
 from pyhive import presto
 from yext import YextClient
-from semantic_vertical_ranking import get_new_vertical_ranks, get_liveapi_response
+from semantic_vertical_ranking import svr, get_new_rank, get_liveapi_response
 
 PRESTO_USER = os.getenv("PRESTO_USER")
 PRESTO_HOST = os.getenv("PRESTO_HOST")
+
+PRIORITY_FIELDS = ["name", "filter_value", "vertical_id"]
+
+
+def _keys_exists(element, *keys):
+    _element = element
+    for key in keys:
+        try:
+            _element = _element[key]
+        except KeyError:
+            return False
+    return True
 
 
 def _flatten(values):
@@ -83,6 +96,23 @@ def get_top_search_terms_from_presto(answers_key, business_id, count=500):
     return search_terms
 
 
+def get_applied_filters(query_filters):
+    entity_type_filter = [
+        any([_keys_exists(filter, "filter", "builtin.entityType") for filter in l if filter])
+        for l in query_filters
+    ]
+    near_me_filter = [
+        any([_keys_exists(filter, "filter", "builtin.location", "$near") for filter in l if filter])
+        for l in query_filters
+    ]
+    location_filter = [
+        any([_keys_exists(filter, "filter", "builtin.location", "$eq") for filter in l if filter])
+        for l in query_filters
+    ]
+
+    return [entity_type_filter, near_me_filter, location_filter]
+
+
 def main(args):
 
     # Fetch top [limit] search terms by search volume from Presto
@@ -124,17 +154,31 @@ def main(args):
             query_filters = [module["appliedQueryFilters"] for module in modules]
             filter_values = [[f_i["displayValue"] for f_i in f] for f in query_filters]
 
+            # Get applied filter booleans
+            filter_criteria = []
+            if args.filters:
+                filter_criteria = get_applied_filters(query_filters)
+
+            # Get SVR scores, and whether scores are on priority fields
+            scores, _, max_fields, _ = svr(
+                query, vertical_ids, first_results, filter_values, vertical_intents, {}
+            )
+            is_priority_fields = [
+                0 if set(fields).isdisjoint(PRIORITY_FIELDS) else 1 for fields in max_fields
+            ]
+
+            # Apply boosts to scores
+            scores = [
+                score + vertical_boosts.get(vertical_id, 0)
+                for score, vertical_id in zip(scores, vertical_ids)
+            ]
+
+            # Bucket similarity scores to nearest 1/10th decimal
+            if args.bucket:
+                scores = [floor(score * 10) / 10 for score in scores]
+
             # Get new rank of verticals for query
-            new_ranks = get_new_vertical_ranks(
-                query,
-                vertical_ids,
-                first_results,
-                filter_values,
-                semantic_fields={},
-                vertical_intents=vertical_intents,
-                vertical_boosts=vertical_boosts,
-                bucket=args.bucket,
-            )[0]
+            new_ranks = get_new_rank(*filter_criteria, *[scores, is_priority_fields])
 
             query_json = get_comparison_json(query, response, modules, new_ranks)
             comparison_json[args.experience_key].append(query_json)
@@ -174,6 +218,12 @@ if __name__ == "__main__":
         "--bucket",
         action="store_true",
         help="Whether or not to bucket similarities to 1/10th place.",
+        default=False,
+    )
+    parser.add_argument(
+        "--filters",
+        action="store_true",
+        help="Whether or not to include entity type, location, and near me filters.",
         default=False,
     )
     parser.add_argument(
