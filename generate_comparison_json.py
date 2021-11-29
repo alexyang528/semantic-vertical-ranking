@@ -1,4 +1,5 @@
 import logging
+import requests
 from rich.logging import RichHandler
 from rich.progress import Progress
 
@@ -13,7 +14,7 @@ import pandas as pd
 from math import floor
 from pyhive import presto
 from yext import YextClient
-from semantic_vertical_ranking import svr, get_new_rank, get_liveapi_response
+from semantic_vertical_ranking import dcg_result_name, svr, get_new_rank, get_liveapi_response
 
 PRESTO_USER = os.getenv("PRESTO_USER")
 PRESTO_HOST = os.getenv("PRESTO_HOST")
@@ -143,6 +144,12 @@ def main(args):
             # Get Live API response for each search term
             response = get_liveapi_response(query, yext_client, args.experience_key)
 
+            # for UPS - context to specify a single store
+            # context = '{"store":"5673","trackingUrl":"../../../ny/brooklyn/144-n-7th-st/track-package"}'
+            # url = f'https://liveapi.yext.com/v2/accounts/me/answers/query?input={query}&experienceKey={args.experience_key}&api_key={args.api_key}&v=20190101&version=PRODUCTION&locale=en&sessionTrackingEnabled=true&context={context}&referrerPageUrl=&source=STANDARD&jsLibVersion=v1.9.2"'
+            # response = requests.get(url).text
+            # response = json.loads(response)["response"]
+
             # Keep just KM modules
             modules = [
                 module for module in response["modules"] if module["source"] == "KNOWLEDGE_MANAGER"
@@ -153,32 +160,49 @@ def main(args):
             vertical_ids = [module["verticalConfigId"] for module in modules]
             query_filters = [module["appliedQueryFilters"] for module in modules]
             filter_values = [[f_i["displayValue"] for f_i in f] for f in query_filters]
+            result_names = [
+                [
+                    result.get("data", {}).get("name", None)
+                    for result in module["results"]
+                    if result.get("data", {}).get("name", None) is not None
+                ]
+                for module in modules
+            ]
+            result_names = [names[:10] for names in result_names]
 
             # Get applied filter booleans
             filter_criteria = []
             if args.filters:
                 filter_criteria = get_applied_filters(query_filters)
 
-            # Get SVR scores, and whether scores are on priority fields
-            scores, _, max_fields, _ = svr(
-                query, vertical_ids, first_results, filter_values, vertical_intents, {}
-            )
-            is_priority_fields = [
-                0 if set(fields).isdisjoint(PRIORITY_FIELDS) else 1 for fields in max_fields
-            ]
+            # Get DCG score if selected
+            if args.dcg:
+                scores = dcg_result_name(query, result_names)[0]
+            # Or get SVR scores, and whether scores are on priority fields
+            else:
+                scores, _, max_fields, _ = svr(
+                    query, vertical_ids, first_results, filter_values, vertical_intents, {}
+                )
+                is_priority_fields = [
+                    0 if set(fields).isdisjoint(PRIORITY_FIELDS) else 1 for fields in max_fields
+                ]
 
-            # Apply boosts to scores
+            # Apply boosts and bucketing to scores
             scores = [
                 score + vertical_boosts.get(vertical_id, 0)
                 for score, vertical_id in zip(scores, vertical_ids)
             ]
-
-            # Bucket similarity scores to nearest 1/10th decimal
             if args.bucket:
                 scores = [floor(score * 10) / 10 for score in scores]
 
+            # Provide which values should be used for new ranking
+            if args.dcg:
+                score_criteria = [scores]
+            else:
+                score_criteria = [scores, is_priority_fields]
+
             # Get new rank of verticals for query
-            new_ranks = get_new_rank(*filter_criteria, *[scores, is_priority_fields])
+            new_ranks = get_new_rank(*filter_criteria, *score_criteria)
 
             query_json = get_comparison_json(query, response, modules, new_ranks)
             comparison_json[args.experience_key].append(query_json)
@@ -224,6 +248,12 @@ if __name__ == "__main__":
         "--filters",
         action="store_true",
         help="Whether or not to include entity type, location, and near me filters.",
+        default=False,
+    )
+    parser.add_argument(
+        "--dcg",
+        action="store_true",
+        help="Whether or not to use Discount Cumulative Gain method.",
         default=False,
     )
     parser.add_argument(
